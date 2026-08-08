@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"suah.dev/protect"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/yggdrasil-network/yggdrasil-go/src/address"
 	"github.com/yggdrasil-network/yggdrasil-go/src/admin"
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
+	"github.com/yggdrasil-network/yggdrasil-go/src/garlic"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
@@ -37,6 +39,7 @@ type node struct {
 	tun       *tun.TunAdapter
 	multicast *multicast.Multicast
 	admin     *admin.AdminSocket
+	garlic    *garlic.Garlic
 }
 
 // The main function is responsible for configuring and starting Yggdrasil.
@@ -286,6 +289,41 @@ func main() {
 		}
 	}
 
+	// Set up the Garlic Routing Overlay (experimental, optional). When
+	// cfg.Garlic.Enabled is false (the default), this block does nothing
+	// and n.garlic stays nil - behavior is identical to a build with no
+	// Garlic support at all. See docs/garlic-architecture.md.
+	{
+		if cfg.Garlic.Enabled {
+			var identity *garlic.Identity
+			if len(cfg.Garlic.PrivateKey) > 0 {
+				if identity, err = garlic.LoadIdentityFromPrivateKey(cfg.Garlic.PrivateKey); err != nil {
+					panic(err)
+				}
+			} else {
+				if identity, err = garlic.NewIdentity(); err != nil {
+					panic(err)
+				}
+				logger.Warnln("No Garlic.PrivateKey configured - generated an ephemeral Garlic identity for this run only")
+			}
+			lifetime, err := time.ParseDuration(cfg.Garlic.CircuitLifetime)
+			if err != nil {
+				panic(fmt.Sprintf("invalid Garlic.CircuitLifetime %q: %v", cfg.Garlic.CircuitLifetime, err))
+			}
+			gcfg := garlic.DefaultConfig()
+			gcfg.PathLength = cfg.Garlic.PathLength
+			gcfg.CircuitLifetime = lifetime
+			gcfg.MaxCircuits = cfg.Garlic.MaxCircuits
+			gcfg.MaxCircuitsPerPeer = cfg.Garlic.MaxCircuitsPerPeer
+			gcfg.MaxRelayCircuits = cfg.Garlic.MaxRelayCircuits
+			n.garlic = garlic.New(n.core, identity, gcfg, garlic.NewStaticRendezvous())
+			logger.Printf("Your Garlic public key is %s", hex.EncodeToString(identity.PublicKey))
+			if n.admin != nil {
+				n.garlic.SetupAdminHandlers(n.admin)
+			}
+		}
+	}
+
 	//Windows service shutdown
 	minwinsvc.SetOnExit(func() {
 		logger.Infof("Shutting down service ...")
@@ -327,6 +365,9 @@ func main() {
 	<-ctx.Done()
 
 	// Shut down the node.
+	if n.garlic != nil {
+		n.garlic.Close()
+	}
 	_ = n.admin.Stop()
 	_ = n.multicast.Stop()
 	_ = n.tun.Stop()

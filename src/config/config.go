@@ -55,6 +55,20 @@ type NodeConfig struct {
 	LogLookups          bool                       `json:",omitempty"`
 	NodeInfoPrivacy     bool                       `comment:"By default, nodeinfo contains some defaults including the platform,\narchitecture and Yggdrasil version. These can help when surveying\nthe network and diagnosing network routing problems. Enabling\nnodeinfo privacy prevents this, so that only items specified in\n\"NodeInfo\" are sent back if specified."`
 	NodeInfo            map[string]interface{}     `comment:"Optional nodeinfo. This must be a { \"key\": \"value\", ... } map\nor set as null. This is entirely optional but, if set, is visible\nto the whole network on request."`
+	Garlic              GarlicConfig               `comment:"Configuration for the experimental Garlic Routing Overlay, an optional\nprivacy-enhanced routing layer built on top of Yggdrasil - see\ndocs/garlic-architecture.md. When Enabled is false (the default),\nbehavior is identical to a node with no Garlic support at all."`
+}
+
+// GarlicConfig holds configuration for the experimental Garlic Routing
+// Overlay (see docs/garlic-architecture.md). The zero value (Enabled:
+// false) means vanilla Yggdrasil behavior.
+type GarlicConfig struct {
+	Enabled            bool     `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
+	PrivateKey         KeyBytes `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
+	PathLength         int      `comment:"Number of hops for circuits this node originates."`
+	CircuitLifetime    string   `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
+	MaxCircuits        int      `comment:"Maximum number of circuits this node will originate at once."`
+	MaxCircuitsPerPeer int      `comment:"Maximum number of originated circuits through any single first-hop\npeer at once."`
+	MaxRelayCircuits   int      `comment:"Maximum number of other nodes' circuits this node will relay at once."`
 }
 
 type MulticastInterfaceConfig struct {
@@ -84,6 +98,14 @@ func GenerateConfig() *NodeConfig {
 	cfg.IfName = defaults.DefaultIfName
 	cfg.IfMTU = defaults.DefaultIfMTU
 	cfg.NodeInfoPrivacy = false
+	cfg.Garlic = GarlicConfig{
+		Enabled:            false,
+		PathLength:         3,
+		CircuitLifetime:    "10m",
+		MaxCircuits:        1024,
+		MaxCircuitsPerPeer: 64,
+		MaxRelayCircuits:   4096,
+	}
 	if err := cfg.postprocessConfig(); err != nil {
 		panic(err)
 	}

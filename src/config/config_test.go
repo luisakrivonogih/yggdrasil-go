@@ -28,6 +28,26 @@ func TestConfigReadFromEmpty(t *testing.T) {
 	}
 }
 
+func TestGarlicConfigDefaultsDisabled(t *testing.T) {
+	cfg := GenerateConfig()
+	if cfg.Garlic.Enabled {
+		t.Error("Garlic.Enabled = true by default, want false")
+	}
+}
+
+// A config file written before the Garlic block existed must keep
+// working, and must not silently enable an experimental feature it
+// never mentioned.
+func TestGarlicConfigAbsentFromInputStaysDisabled(t *testing.T) {
+	var cfg NodeConfig
+	if _, err := cfg.ReadFrom(bytes.NewReader([]byte("{}"))); err != nil {
+		t.Fatalf("ReadFrom returned error: %v", err)
+	}
+	if cfg.Garlic.Enabled {
+		t.Error("Garlic.Enabled = true for a config that never mentions garlic, want false")
+	}
+}
+
 func TestConfig_Keys(t *testing.T) {
 	/*
 		var nodeConfig NodeConfig
