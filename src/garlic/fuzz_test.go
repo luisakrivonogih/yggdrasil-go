@@ -1,0 +1,119 @@
+package garlic
+
+// Adversarial fuzzing (Phase 13 of the roadmap) for every parser that
+// handles bytes an untrusted remote peer controls. The property under
+// test is simply "never panics" - malformed input must always come back
+// as an error, never a crash, never an unbounded allocation. Run with:
+//
+//	go test ./src/garlic/... -fuzz=FuzzEnvelopeUnmarshal -fuzztime=60s
+//
+// (and similarly for the other Fuzz* targets below).
+
+import (
+	"testing"
+	"time"
+)
+
+func FuzzEnvelopeUnmarshal(f *testing.F) {
+	valid := &Envelope{
+		Version:       EnvelopeVersion1,
+		CircuitID:     1,
+		PacketCounter: 1,
+		Expiration:    9999999999,
+		Body:          []byte("hello"),
+		Padding:       []byte{0, 0, 0},
+	}
+	validBytes, _ := valid.Marshal()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0})
+	f.Add(make([]byte, envelopeFixedHeaderSize-1))
+	f.Add(make([]byte, envelopeFixedHeaderSize))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = Unmarshal(data)
+	})
+}
+
+func FuzzBundleUnmarshal(f *testing.F) {
+	valid := &Bundle{Messages: [][]byte{[]byte("a"), []byte("bb"), {}}}
+	validBytes, _ := valid.Marshal()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 0})
+	f.Add([]byte{0xFF, 0xFF, 0xFF, 0xFF})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = UnmarshalBundle(data)
+	})
+}
+
+func FuzzCapabilityMessageUnmarshal(f *testing.F) {
+	valid := &CapabilityMessage{Versions: []string{CapabilityGarlicV1}, PublicKey: make([]byte, KeySize)}
+	validBytes, _ := valid.Marshal()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0})
+	f.Add([]byte{255})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = UnmarshalCapabilityMessage(data)
+	})
+}
+
+func FuzzProcessCircuitData(f *testing.F) {
+	id, err := NewIdentity()
+	if err != nil {
+		f.Fatalf("NewIdentity returned error: %v", err)
+	}
+	g := &Garlic{
+		identity:   id,
+		cfg:        DefaultConfig(),
+		relayState: newRelayCircuitState(1024),
+		delivered:  make(chan DeliveredMessage, 256),
+	}
+
+	valid, _ := buildTestCircuitDataForFuzz(id, []byte("payload"), time.Minute)
+	f.Add(valid)
+	f.Add([]byte{})
+	f.Add(make([]byte, KeySize))
+	f.Add(make([]byte, circuitDataMinSize))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_ = g.processCircuitData(data)
+	})
+}
+
+// buildTestCircuitDataForFuzz is a minimal standalone variant of
+// buildTestCircuitData (relay_logic_test.go) that doesn't depend on
+// *testing.T, since Fuzz seed setup runs outside a single subtest.
+func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration) ([]byte, error) {
+	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
+	if err != nil {
+		return nil, err
+	}
+	secret, err := ECDH(ephemeralPriv, id.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	key, err := DeriveKey(secret, nil, LabelLayerKey)
+	if err != nil {
+		return nil, err
+	}
+	c, err := NewCircuit([]Hop{{NodeKey: id.PublicKey, Key: key}}, time.Minute, 100, 100000)
+	if err != nil {
+		return nil, err
+	}
+	onion, _, counter, err := c.Seal(payload)
+	if err != nil {
+		return nil, err
+	}
+	env := &Envelope{
+		Version:       EnvelopeVersion1,
+		CircuitID:     uint64(c.ID),
+		PacketCounter: counter,
+		Expiration:    uint64(time.Now().Add(ttl).Unix()),
+		Body:          onion,
+	}
+	envBytes, err := env.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	return append(append([]byte(nil), ephemeralPub...), envBytes...), nil
+}
