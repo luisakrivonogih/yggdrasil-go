@@ -74,6 +74,13 @@ func (m *CircuitManager) Add(hops []Hop, lifetime time.Duration, maxPackets, max
 	return c, nil
 }
 
+// Count returns the number of circuits currently tracked.
+func (m *CircuitManager) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.circuits)
+}
+
 // Get returns the circuit with the given ID, if tracked.
 func (m *CircuitManager) Get(id CircuitID) (*Circuit, bool) {
 	m.mu.Lock()

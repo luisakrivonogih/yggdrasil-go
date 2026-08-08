@@ -50,6 +50,13 @@ func (s *relayCircuitState) replayWindowFor(id CircuitID) (w *ReplayWindow, ok b
 	return w, true
 }
 
+// count returns the number of circuits currently tracked.
+func (s *relayCircuitState) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.windows)
+}
+
 // expireStale removes tracked circuits not touched within maxAge,
 // returning how many were removed.
 func (s *relayCircuitState) expireStale(maxAge time.Duration) int {

@@ -120,6 +120,24 @@ func TestCircuitManagerExpireStaleRemovesExpiredCircuits(t *testing.T) {
 	}
 }
 
+func TestCircuitManagerCount(t *testing.T) {
+	m := NewCircuitManager(testManagerConfig())
+	if m.Count() != 0 {
+		t.Fatalf("Count() = %d, want 0", m.Count())
+	}
+	c, err := m.Add(testHops(1), time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("Add returned error: %v", err)
+	}
+	if m.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1", m.Count())
+	}
+	m.Close(c.ID)
+	if m.Count() != 0 {
+		t.Fatalf("Count() after Close = %d, want 0", m.Count())
+	}
+}
+
 func TestCircuitManagerExpireStaleLeavesFreshCircuits(t *testing.T) {
 	m := NewCircuitManager(testManagerConfig())
 	c, err := m.Add(testHops(1), time.Minute, 100, 100000)
