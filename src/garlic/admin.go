@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/admin"
@@ -47,17 +48,18 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}, nil
 		})
 
-	_ = a.AddHandler("createGarlicCircuit", "Build a circuit through the given ordered list of node keys", []string{"hops"},
+	_ = a.AddHandler("createGarlicCircuit", "Build a circuit through the given comma-separated, ordered list of hex node keys", []string{"hops"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
-				Hops []string `json:"hops"`
+				Hops string `json:"hops"`
 			}
 			if err := json.Unmarshal(in, &req); err != nil {
 				return nil, err
 			}
-			path := make([]CapabilityMessage, len(req.Hops))
-			nodeKeys := make([][]byte, len(req.Hops))
-			for i, h := range req.Hops {
+			hops := splitCommaList(req.Hops)
+			path := make([]CapabilityMessage, len(hops))
+			nodeKeys := make([][]byte, len(hops))
+			for i, h := range hops {
 				key, err := hex.DecodeString(h)
 				if err != nil {
 					return nil, fmt.Errorf("invalid hop key: %w", err)
@@ -112,14 +114,14 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 	_ = a.AddHandler("recvGarlic", "Wait for the next payload delivered to this node as a circuit's final hop", []string{"[timeoutSeconds]"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
-				TimeoutSeconds float64 `json:"timeoutSeconds"`
+				TimeoutSeconds string `json:"timeoutSeconds"`
 			}
 			if err := json.Unmarshal(in, &req); err != nil {
 				return nil, err
 			}
-			timeout := 5 * time.Second
-			if req.TimeoutSeconds > 0 {
-				timeout = time.Duration(req.TimeoutSeconds * float64(time.Second))
+			timeout, err := parseSecondsOrDefault(req.TimeoutSeconds, 5*time.Second)
+			if err != nil {
+				return nil, err
 			}
 			msg, err := g.RecvGarlic(timeout)
 			if err != nil {
@@ -134,9 +136,9 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 	_ = a.AddHandler("publishGarlicService", "Publish this node's identity at a set of introduction points", []string{"serviceId", "introPoints", "[ttlSeconds]"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
-				ServiceID   string   `json:"serviceId"`
-				IntroPoints []string `json:"introPoints"`
-				TTLSeconds  float64  `json:"ttlSeconds"`
+				ServiceID   string `json:"serviceId"`
+				IntroPoints string `json:"introPoints"`
+				TTLSeconds  string `json:"ttlSeconds"`
 			}
 			if err := json.Unmarshal(in, &req); err != nil {
 				return nil, err
@@ -145,17 +147,18 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid serviceId: %w", err)
 			}
-			points := make([]IntroPoint, len(req.IntroPoints))
-			for i, p := range req.IntroPoints {
+			introPoints := splitCommaList(req.IntroPoints)
+			points := make([]IntroPoint, len(introPoints))
+			for i, p := range introPoints {
 				key, err := hex.DecodeString(p)
 				if err != nil {
 					return nil, fmt.Errorf("invalid introduction point: %w", err)
 				}
 				points[i] = IntroPoint{NodeKey: key}
 			}
-			ttl := time.Hour
-			if req.TTLSeconds > 0 {
-				ttl = time.Duration(req.TTLSeconds * float64(time.Second))
+			ttl, err := parseSecondsOrDefault(req.TTLSeconds, time.Hour)
+			if err != nil {
+				return nil, err
 			}
 			gid, err := g.PublishService(serviceID, points, ttl)
 			if err != nil {
@@ -195,6 +198,32 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 				"relayedCircuits":    stats.RelayedCircuits,
 			}, nil
 		})
+}
+
+// parseSecondsOrDefault parses s as a floating-point number of seconds,
+// returning def if s is empty. Numeric admin arguments are strings for
+// the same reason list arguments are comma-separated - see
+// splitCommaList's doc comment.
+func parseSecondsOrDefault(s string, def time.Duration) (time.Duration, error) {
+	if s == "" {
+		return def, nil
+	}
+	var seconds float64
+	if _, err := fmt.Sscanf(s, "%g", &seconds); err != nil {
+		return 0, fmt.Errorf("invalid seconds value %q: %w", s, err)
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+// splitCommaList splits a comma-separated list argument, as sent by
+// yggdrasilctl's plain key=value CLI syntax (which only ever passes flat
+// strings, never JSON arrays - see cmd/yggdrasilctl/main.go). An empty
+// string yields an empty (not single-element) list.
+func splitCommaList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 func circuitIDToString(id CircuitID) string {
