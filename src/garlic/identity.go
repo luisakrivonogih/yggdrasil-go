@@ -37,3 +37,22 @@ func LoadIdentity(publicKey, privateKey []byte) (*Identity, error) {
 		PrivateKey: append([]byte(nil), privateKey...),
 	}, nil
 }
+
+// LoadIdentityFromPrivateKey reconstructs an Identity from just a
+// private key, deriving the matching public key. This is what lets
+// config persist a single 32-byte secret for a stable Garlic identity
+// across restarts, the same way the node's main Yggdrasil identity only
+// persists a private key.
+func LoadIdentityFromPrivateKey(privateKey []byte) (*Identity, error) {
+	if len(privateKey) != KeySize {
+		return nil, ErrInvalidIdentityKeySize
+	}
+	publicKey, err := DerivePublicKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	return &Identity{
+		PublicKey:  publicKey,
+		PrivateKey: append([]byte(nil), privateKey...),
+	}, nil
+}

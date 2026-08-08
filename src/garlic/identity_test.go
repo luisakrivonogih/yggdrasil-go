@@ -52,3 +52,26 @@ func TestLoadIdentityRejectsWrongSizePrivateKey(t *testing.T) {
 		t.Fatal("expected error for wrong-size private key, got nil")
 	}
 }
+
+func TestLoadIdentityFromPrivateKeyDerivesMatchingPublicKey(t *testing.T) {
+	id, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	loaded, err := LoadIdentityFromPrivateKey(id.PrivateKey)
+	if err != nil {
+		t.Fatalf("LoadIdentityFromPrivateKey returned error: %v", err)
+	}
+	if !bytes.Equal(loaded.PublicKey, id.PublicKey) {
+		t.Errorf("derived PublicKey = %x, want %x", loaded.PublicKey, id.PublicKey)
+	}
+	if !bytes.Equal(loaded.PrivateKey, id.PrivateKey) {
+		t.Errorf("PrivateKey = %x, want %x", loaded.PrivateKey, id.PrivateKey)
+	}
+}
+
+func TestLoadIdentityFromPrivateKeyRejectsWrongSize(t *testing.T) {
+	if _, err := LoadIdentityFromPrivateKey(make([]byte, 16)); err == nil {
+		t.Fatal("expected error for wrong-size private key, got nil")
+	}
+}

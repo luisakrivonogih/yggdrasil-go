@@ -121,11 +121,16 @@ func GenerateKeypair() (public, private []byte, err error) {
 	if _, err := rand.Read(private); err != nil {
 		return nil, nil, err
 	}
-	public, err = curve25519.X25519(private, curve25519.Basepoint)
+	public, err = DerivePublicKey(private)
 	if err != nil {
 		return nil, nil, err
 	}
 	return public, private, nil
+}
+
+// DerivePublicKey computes the X25519 public key matching privateKey.
+func DerivePublicKey(privateKey []byte) ([]byte, error) {
+	return curve25519.X25519(privateKey, curve25519.Basepoint)
 }
 
 // ECDH computes the X25519 shared secret between a local private key and a
