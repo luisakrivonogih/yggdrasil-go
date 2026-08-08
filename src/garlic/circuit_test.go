@@ -53,22 +53,25 @@ func TestCircuitSealProducesPeelableOnion(t *testing.T) {
 	}
 	payload := []byte("hello bob")
 
-	onion, firstHop, err := c.Seal(payload)
+	onion, firstHop, counter, err := c.Seal(payload)
 	if err != nil {
 		t.Fatalf("Seal returned error: %v", err)
 	}
 	if !bytes.Equal(firstHop, hops[0].NodeKey) {
 		t.Fatalf("firstHop = %q, want %q", firstHop, hops[0].NodeKey)
 	}
+	if counter != 0 {
+		t.Fatalf("counter = %d, want 0 (first Seal call)", counter)
+	}
 
-	atHop0, err := DecryptLayer(hops[0].Key, 0, onion)
+	atHop0, err := DecryptLayer(hops[0].Key, counter, onion)
 	if err != nil {
 		t.Fatalf("DecryptLayer at hop0 (counter 0) returned error: %v", err)
 	}
 	if !bytes.Equal(atHop0.NextHop, hops[1].NodeKey) {
 		t.Fatalf("hop0 NextHop = %q, want %q", atHop0.NextHop, hops[1].NodeKey)
 	}
-	atHop1, err := DecryptLayer(hops[1].Key, 0, atHop0.Inner)
+	atHop1, err := DecryptLayer(hops[1].Key, counter, atHop0.Inner)
 	if err != nil {
 		t.Fatalf("DecryptLayer at hop1 (counter 0) returned error: %v", err)
 	}
@@ -84,25 +87,28 @@ func TestCircuitSealIncrementsPerHopCounters(t *testing.T) {
 		t.Fatalf("NewCircuit returned error: %v", err)
 	}
 
-	onion1, _, err := c.Seal([]byte("first"))
+	onion1, _, counter1, err := c.Seal([]byte("first"))
 	if err != nil {
 		t.Fatalf("first Seal returned error: %v", err)
 	}
-	onion2, _, err := c.Seal([]byte("second"))
+	onion2, _, counter2, err := c.Seal([]byte("second"))
 	if err != nil {
 		t.Fatalf("second Seal returned error: %v", err)
 	}
-
-	if _, err := DecryptLayer(hops[0].Key, 0, onion1); err != nil {
-		t.Fatalf("expected onion1 decryptable at counter 0: %v", err)
+	if counter2 != counter1+1 {
+		t.Fatalf("counter2 = %d, want counter1+1 = %d", counter2, counter1+1)
 	}
-	if _, err := DecryptLayer(hops[0].Key, 1, onion2); err != nil {
-		t.Fatalf("expected onion2 decryptable at counter 1: %v", err)
+
+	if _, err := DecryptLayer(hops[0].Key, counter1, onion1); err != nil {
+		t.Fatalf("expected onion1 decryptable at counter1: %v", err)
+	}
+	if _, err := DecryptLayer(hops[0].Key, counter2, onion2); err != nil {
+		t.Fatalf("expected onion2 decryptable at counter2: %v", err)
 	}
 	// The counter must actually have moved on - onion2 must not also be
-	// decryptable at counter 0 (that would mean a nonce got reused).
-	if _, err := DecryptLayer(hops[0].Key, 0, onion2); err == nil {
-		t.Fatal("onion2 decrypted at counter 0, want failure (would indicate nonce reuse)")
+	// decryptable at counter1 (that would mean a nonce got reused).
+	if _, err := DecryptLayer(hops[0].Key, counter1, onion2); err == nil {
+		t.Fatal("onion2 decrypted at counter1, want failure (would indicate nonce reuse)")
 	}
 }
 
@@ -113,7 +119,7 @@ func TestCircuitSealRejectsAfterExpiry(t *testing.T) {
 	}
 	time.Sleep(5 * time.Millisecond)
 
-	if _, _, err := c.Seal([]byte("payload")); err == nil {
+	if _, _, _, err := c.Seal([]byte("payload")); err == nil {
 		t.Fatal("expected error sealing on an expired circuit, got nil")
 	}
 }
@@ -123,10 +129,10 @@ func TestCircuitSealRejectsAfterMaxPackets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCircuit returned error: %v", err)
 	}
-	if _, _, err := c.Seal([]byte("first")); err != nil {
+	if _, _, _, err := c.Seal([]byte("first")); err != nil {
 		t.Fatalf("first Seal returned error: %v", err)
 	}
-	if _, _, err := c.Seal([]byte("second")); err == nil {
+	if _, _, _, err := c.Seal([]byte("second")); err == nil {
 		t.Fatal("expected error exceeding MaxPackets, got nil")
 	}
 }
@@ -136,7 +142,7 @@ func TestCircuitSealRejectsAfterMaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCircuit returned error: %v", err)
 	}
-	if _, _, err := c.Seal([]byte("123456789")); err == nil {
+	if _, _, _, err := c.Seal([]byte("123456789")); err == nil {
 		t.Fatal("expected error exceeding MaxBytes, got nil")
 	}
 }
@@ -147,7 +153,7 @@ func TestCircuitSealRejectsAfterClose(t *testing.T) {
 		t.Fatalf("NewCircuit returned error: %v", err)
 	}
 	c.Close()
-	if _, _, err := c.Seal([]byte("payload")); err == nil {
+	if _, _, _, err := c.Seal([]byte("payload")); err == nil {
 		t.Fatal("expected error sealing a closed circuit, got nil")
 	}
 }

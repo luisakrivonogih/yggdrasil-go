@@ -82,7 +82,7 @@ func TestCircuitManagerCloseRemovesCircuit(t *testing.T) {
 	if _, ok := m.Get(c.ID); ok {
 		t.Fatal("Get() after Close() ok = true, want false")
 	}
-	if _, _, err := c.Seal([]byte("payload")); err == nil {
+	if _, _, _, err := c.Seal([]byte("payload")); err == nil {
 		t.Fatal("Seal() on a manager-closed circuit succeeded, want error")
 	}
 }

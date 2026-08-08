@@ -91,39 +91,47 @@ func (c *Circuit) FirstHop() []byte {
 
 // Seal builds a layered-encrypted onion carrying payload over the
 // circuit's path, using and then advancing each hop's per-hop counter so
-// a later call never reuses a (key, counter) pair. It returns the onion
-// to transmit and the node key of the first hop to send it to.
+// a later call never reuses a (key, counter) pair. Every hop's counter
+// stays in lockstep (all start at 0 and are incremented together each
+// call), so Seal also returns that shared counter value - the caller
+// puts it in the wire Envelope's PacketCounter field unchanged, and every
+// hop along the path uses that same field for its own DecryptLayer call,
+// with no need for hops to otherwise coordinate per-hop counter state.
+//
+// It returns the onion to transmit, the node key of the first hop to
+// send it to, and the counter used.
 //
 // It fails - without mutating any state - once the circuit is closed,
 // expired, or would exceed its packet/byte budget; the caller is expected
 // to build a replacement circuit (rekey) in that case rather than retry.
-func (c *Circuit) Seal(payload []byte) (onion []byte, firstHop []byte, err error) {
+func (c *Circuit) Seal(payload []byte) (onion []byte, firstHop []byte, counter uint64, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.closed {
-		return nil, nil, ErrCircuitClosed
+		return nil, nil, 0, ErrCircuitClosed
 	}
 	if time.Now().After(c.ExpiresAt) {
-		return nil, nil, ErrCircuitExpired
+		return nil, nil, 0, ErrCircuitExpired
 	}
 	if c.packetsSent+1 > c.MaxPackets {
-		return nil, nil, ErrCircuitPacketLimitExceeded
+		return nil, nil, 0, ErrCircuitPacketLimitExceeded
 	}
 	if c.bytesSent+uint64(len(payload)) > c.MaxBytes {
-		return nil, nil, ErrCircuitByteLimitExceeded
+		return nil, nil, 0, ErrCircuitByteLimitExceeded
 	}
 
 	onion, err = BuildOnion(c.hops, payload)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
+	counter = c.hops[0].Counter
 	for i := range c.hops {
 		c.hops[i].Counter++
 	}
 	c.packetsSent++
 	c.bytesSent += uint64(len(payload))
-	return onion, c.hops[0].NodeKey, nil
+	return onion, c.hops[0].NodeKey, counter, nil
 }
 
 // Close marks the circuit unusable for further Seal calls.
