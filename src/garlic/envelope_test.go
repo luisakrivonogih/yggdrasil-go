@@ -168,3 +168,62 @@ func TestUnmarshalDoesNotAliasInputBuffer(t *testing.T) {
 		t.Errorf("Body = %q after mutating input buffer, want unaffected copy %q", got.Body, "original")
 	}
 }
+
+func TestEnvelopePadToProducesExactCellSize(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1, Body: []byte("a short body")}
+	if err := env.PadTo(1200); err != nil {
+		t.Fatalf("PadTo returned error: %v", err)
+	}
+	data, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if len(data) != 1200 {
+		t.Errorf("len(data) = %d, want 1200", len(data))
+	}
+}
+
+func TestEnvelopePadToZeroPaddingNeeded(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1}
+	unpadded, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if err := env.PadTo(len(unpadded)); err != nil {
+		t.Fatalf("PadTo returned error: %v", err)
+	}
+	if len(env.Padding) != 0 {
+		t.Errorf("Padding = %d bytes, want 0", len(env.Padding))
+	}
+}
+
+func TestEnvelopePadToRejectsCellSizeTooSmall(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1, Body: make([]byte, 100)}
+	if err := env.PadTo(10); err == nil {
+		t.Fatal("expected error for a cell size smaller than the unpadded envelope, got nil")
+	}
+}
+
+func TestEnvelopePadToIsIdempotentAcrossRepeatedCalls(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1, Body: []byte("a short body")}
+	if err := env.PadTo(1200); err != nil {
+		t.Fatalf("first PadTo returned error: %v", err)
+	}
+	if err := env.PadTo(1200); err != nil {
+		t.Fatalf("second PadTo returned error: %v", err)
+	}
+	data, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if len(data) != 1200 {
+		t.Errorf("len(data) = %d, want 1200 (padding must not accumulate across calls)", len(data))
+	}
+}
+
+func TestEnvelopePadToRejectsExceedingMaxPaddingSize(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1}
+	if err := env.PadTo(envelopeFixedHeaderSize + 4 + MaxPaddingSize + 1); err == nil {
+		t.Fatal("expected error when the needed padding exceeds MaxPaddingSize, got nil")
+	}
+}

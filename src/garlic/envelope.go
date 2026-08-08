@@ -10,6 +10,7 @@
 package garlic
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 )
@@ -37,6 +38,7 @@ var (
 	ErrUnsupportedVersion = errors.New("garlic: unsupported envelope version")
 	ErrBodyTooLarge       = errors.New("garlic: envelope body exceeds maximum size")
 	ErrPaddingTooLarge    = errors.New("garlic: envelope padding exceeds maximum size")
+	ErrCellSizeTooSmall   = errors.New("garlic: cell size too small for envelope")
 )
 
 // Envelope is the Garlic Envelope: the outermost structure carried as the
@@ -76,6 +78,34 @@ func (e *Envelope) Marshal() ([]byte, error) {
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(e.Padding)))
 	buf = append(buf, e.Padding...)
 	return buf, nil
+}
+
+// PadTo sets e.Padding so that e.Marshal's output is exactly cellSize
+// bytes long, for fixed-size packet normalization (see
+// docs/garlic-architecture.md §13). It resets any existing padding first,
+// so calling it repeatedly does not accumulate padding. It fails with
+// ErrCellSizeTooSmall if the envelope without padding already exceeds
+// cellSize, and with ErrPaddingTooLarge if the padding needed would
+// exceed MaxPaddingSize.
+func (e *Envelope) PadTo(cellSize int) error {
+	e.Padding = nil
+	unpadded, err := e.Marshal()
+	if err != nil {
+		return err
+	}
+	if len(unpadded) > cellSize {
+		return ErrCellSizeTooSmall
+	}
+	needed := cellSize - len(unpadded)
+	if needed > MaxPaddingSize {
+		return ErrPaddingTooLarge
+	}
+	padding := make([]byte, needed)
+	if _, err := rand.Read(padding); err != nil {
+		return err
+	}
+	e.Padding = padding
+	return nil
 }
 
 // Unmarshal decodes a Garlic Envelope from its wire format. It never trusts
