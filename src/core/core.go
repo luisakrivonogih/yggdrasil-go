@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"sync/atomic"
 
 	iwe "github.com/Arceliar/ironwood/encrypted"
 	iwn "github.com/Arceliar/ironwood/network"
@@ -44,7 +45,8 @@ type Core struct {
 		_allowedPublicKeys map[[32]byte]struct{}      // configurable after startup
 		groupPassword      string                     // immutable after startup
 	}
-	pathNotify func(ed25519.PublicKey)
+	pathNotify    func(ed25519.PublicKey)
+	garlicHandler atomic.Pointer[GarlicHandler]
 }
 
 func New(cert *tls.Certificate, logger Logger, opts ...SetupOption) (*Core, error) {
@@ -193,6 +195,13 @@ func (c *Core) ReadFrom(p []byte) (n int, from net.Addr, err error) {
 			data := append([]byte(nil), bs[1:n]...)
 			c.proto.handleProto(nil, key, data)
 			continue
+		case typeSessionGarlic:
+			if h := c.getGarlicHandler(); h != nil {
+				key := append(ed25519.PublicKey(nil), from.(iwt.Addr)...)
+				data := append([]byte(nil), bs[1:n]...)
+				h(key, data)
+			}
+			continue
 		default:
 			continue
 		}
@@ -211,6 +220,24 @@ func (c *Core) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	buf := allocBytes(0)
 	defer func() { freeBytes(buf) }()
 	buf = append(buf, typeSessionTraffic)
+	buf = append(buf, p...)
+	n, err = c.PacketConn.WriteTo(buf, addr)
+	if n > 0 {
+		n -= 1
+	}
+	return
+}
+
+// WriteGarlic sends data to addr tagged as Garlic Routing Overlay traffic
+// (see src/garlic). It behaves exactly like WriteTo, except the receiving
+// node's Core.ReadFrom will route it to a registered GarlicHandler instead
+// of returning it as ordinary IPv6 traffic - or silently drop it, if that
+// node has none registered (e.g. it's a legacy node, or Garlic is
+// disabled), with no error and no observable side effect on that node.
+func (c *Core) WriteGarlic(p []byte, addr net.Addr) (n int, err error) {
+	buf := allocBytes(0)
+	defer func() { freeBytes(buf) }()
+	buf = append(buf, typeSessionGarlic)
 	buf = append(buf, p...)
 	n, err = c.PacketConn.WriteTo(buf, addr)
 	if n > 0 {

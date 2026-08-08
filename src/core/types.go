@@ -5,6 +5,7 @@ const (
 	typeSessionDummy = iota // nolint:deadcode,varcheck
 	typeSessionTraffic
 	typeSessionProto
+	typeSessionGarlic // optional experimental Garlic Routing Overlay, see src/garlic
 )
 
 // Protocol packet types
