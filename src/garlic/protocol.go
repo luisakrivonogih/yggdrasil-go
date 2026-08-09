@@ -110,6 +110,13 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 		Expiration:    env.Expiration,
 		Body:          layer.Inner,
 	}
+	// Independently re-randomize this hop's outgoing wire size (see
+	// Config.PaddingEnabled's doc comment) - a config error here (e.g.
+	// MaxPaddedSize too small for this body) degrades to unpadded
+	// forwarding rather than dropping an otherwise-valid packet.
+	if g.cfg.PaddingEnabled {
+		_ = nextEnv.PadToRandomRange(g.cfg.MinPaddedSize, g.cfg.MaxPaddedSize)
+	}
 	nextBytes, err := nextEnv.Marshal()
 	if err != nil {
 		return circuitAction{kind: actionDrop}

@@ -227,3 +227,65 @@ func TestEnvelopePadToRejectsExceedingMaxPaddingSize(t *testing.T) {
 		t.Fatal("expected error when the needed padding exceeds MaxPaddingSize, got nil")
 	}
 }
+
+func TestEnvelopePadToRandomRangeStaysWithinBounds(t *testing.T) {
+	for range 50 {
+		env := &Envelope{Version: EnvelopeVersion1, Body: []byte("a short body")}
+		if err := env.PadToRandomRange(1000, 1400); err != nil {
+			t.Fatalf("PadToRandomRange returned error: %v", err)
+		}
+		data, err := env.Marshal()
+		if err != nil {
+			t.Fatalf("Marshal returned error: %v", err)
+		}
+		if len(data) < 1000 || len(data) > 1400 {
+			t.Fatalf("len(data) = %d, want in [1000, 1400]", len(data))
+		}
+	}
+}
+
+func TestEnvelopePadToRandomRangeProducesVariety(t *testing.T) {
+	sizes := map[int]bool{}
+	for range 50 {
+		env := &Envelope{Version: EnvelopeVersion1, Body: []byte("x")}
+		if err := env.PadToRandomRange(500, 2000); err != nil {
+			t.Fatalf("PadToRandomRange returned error: %v", err)
+		}
+		data, err := env.Marshal()
+		if err != nil {
+			t.Fatalf("Marshal returned error: %v", err)
+		}
+		sizes[len(data)] = true
+	}
+	if len(sizes) < 2 {
+		t.Fatalf("PadToRandomRange produced only %d distinct size(s) across 50 calls, want variety", len(sizes))
+	}
+}
+
+func TestEnvelopePadToRandomRangeRaisesLowerBoundForLargeBody(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1, Body: make([]byte, 1200)}
+	if err := env.PadToRandomRange(10, 2000); err != nil {
+		t.Fatalf("PadToRandomRange returned error: %v", err)
+	}
+	data, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if len(data) < envelopeFixedHeaderSize+4+1200 {
+		t.Fatalf("len(data) = %d, want at least the unpadded envelope size even though minSize was smaller", len(data))
+	}
+}
+
+func TestEnvelopePadToRandomRangeRejectsWhenUnpaddedExceedsMax(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1, Body: make([]byte, 2000)}
+	if err := env.PadToRandomRange(10, 100); err == nil {
+		t.Fatal("expected error when the unpadded envelope already exceeds maxSize, got nil")
+	}
+}
+
+func TestEnvelopePadToRandomRangeRejectsInvertedRange(t *testing.T) {
+	env := &Envelope{Version: EnvelopeVersion1}
+	if err := env.PadToRandomRange(2000, 1000); err == nil {
+		t.Fatal("expected error for maxSize < minSize, got nil")
+	}
+}

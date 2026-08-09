@@ -129,6 +129,80 @@ func TestProcessCircuitDataIntermediateHopForwards(t *testing.T) {
 	}
 }
 
+func TestProcessCircuitDataForwardAppliesRandomPadding(t *testing.T) {
+	relay := newTestGarlic(t) // DefaultConfig: PaddingEnabled, [512, 1400]
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+
+	sizes := map[int]bool{}
+	for range 20 {
+		msg, _ := buildTestCircuitData(t,
+			[]*Identity{relay.identity, destID},
+			[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
+			[]byte("payload"), time.Minute)
+		action := relay.processCircuitData(msg)
+		if action.kind != actionForward {
+			t.Fatalf("action.kind = %v, want actionForward", action.kind)
+		}
+		sizes[len(action.forwardMsg)] = true
+	}
+	if len(sizes) < 2 {
+		t.Fatalf("got %d distinct forwarded message size(s) across 20 calls, want variety from per-hop padding randomization", len(sizes))
+	}
+}
+
+func TestProcessCircuitDataForwardPaddingWithinConfiguredRange(t *testing.T) {
+	relay := newTestGarlic(t)
+	relay.cfg.MinPaddedSize = 1000
+	relay.cfg.MaxPaddedSize = 1200
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+
+	msg, _ := buildTestCircuitData(t,
+		[]*Identity{relay.identity, destID},
+		[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
+		[]byte("payload"), time.Minute)
+	action := relay.processCircuitData(msg)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+
+	envSize := len(action.forwardMsg) - 1 - KeySize // strip msgType byte and ephemeral pubkey
+	if envSize < relay.cfg.MinPaddedSize || envSize > relay.cfg.MaxPaddedSize {
+		t.Fatalf("forwarded envelope size = %d, want in [%d, %d]", envSize, relay.cfg.MinPaddedSize, relay.cfg.MaxPaddedSize)
+	}
+}
+
+func TestProcessCircuitDataForwardSkipsPaddingWhenDisabled(t *testing.T) {
+	relay := newTestGarlic(t)
+	relay.cfg.PaddingEnabled = false
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+
+	msg, _ := buildTestCircuitData(t,
+		[]*Identity{relay.identity, destID},
+		[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
+		[]byte("payload"), time.Minute)
+	action := relay.processCircuitData(msg)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+
+	forwardedEnv, err := Unmarshal(action.forwardMsg[1+KeySize:])
+	if err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	if len(forwardedEnv.Padding) != 0 {
+		t.Fatalf("forwarded envelope has %d bytes of padding, want 0 (padding disabled)", len(forwardedEnv.Padding))
+	}
+}
+
 func TestProcessCircuitDataDropsWrongRecipient(t *testing.T) {
 	g := newTestGarlic(t)
 	other, err := NewIdentity()

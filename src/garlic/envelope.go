@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"math/big"
 )
 
 // EnvelopeVersion1 is the only Garlic Envelope wire version defined so far.
@@ -33,12 +34,13 @@ const (
 const envelopeFixedHeaderSize = 1 + 8 + 8 + 8 + 4
 
 var (
-	ErrEnvelopeTooShort   = errors.New("garlic: envelope shorter than fixed header")
-	ErrEnvelopeTruncated  = errors.New("garlic: envelope truncated")
-	ErrUnsupportedVersion = errors.New("garlic: unsupported envelope version")
-	ErrBodyTooLarge       = errors.New("garlic: envelope body exceeds maximum size")
-	ErrPaddingTooLarge    = errors.New("garlic: envelope padding exceeds maximum size")
-	ErrCellSizeTooSmall   = errors.New("garlic: cell size too small for envelope")
+	ErrEnvelopeTooShort    = errors.New("garlic: envelope shorter than fixed header")
+	ErrEnvelopeTruncated   = errors.New("garlic: envelope truncated")
+	ErrUnsupportedVersion  = errors.New("garlic: unsupported envelope version")
+	ErrBodyTooLarge        = errors.New("garlic: envelope body exceeds maximum size")
+	ErrPaddingTooLarge     = errors.New("garlic: envelope padding exceeds maximum size")
+	ErrCellSizeTooSmall    = errors.New("garlic: cell size too small for envelope")
+	ErrInvalidPaddingRange = errors.New("garlic: invalid padding size range")
 )
 
 // Envelope is the Garlic Envelope: the outermost structure carried as the
@@ -106,6 +108,51 @@ func (e *Envelope) PadTo(cellSize int) error {
 	}
 	e.Padding = padding
 	return nil
+}
+
+// PadToRandomRange pads e to a uniformly random size in [minSize, maxSize]
+// (raising the effective lower bound to the envelope's own unpadded size
+// if that's already larger than minSize). Unlike PadTo's single fixed
+// target, calling this independently at every hop - both at the
+// originator and again at each relay when it rebuilds the forwarded
+// envelope - means the wire size changes at every hop, so an observer
+// comparing sizes seen near the two ends of a hop-to-hop link gets no
+// consistent size fingerprint to correlate on. See
+// docs/garlic-security.md's traffic-correlation discussion for why this
+// is deliberately independent per hop rather than a single value chosen
+// once by the originator.
+func (e *Envelope) PadToRandomRange(minSize, maxSize int) error {
+	if maxSize < minSize {
+		return ErrInvalidPaddingRange
+	}
+	e.Padding = nil
+	unpadded, err := e.Marshal()
+	if err != nil {
+		return err
+	}
+	lower := max(minSize, len(unpadded))
+	if lower > maxSize {
+		return ErrCellSizeTooSmall
+	}
+	target, err := randomIntInRange(lower, maxSize)
+	if err != nil {
+		return err
+	}
+	return e.PadTo(target)
+}
+
+// randomIntInRange returns a cryptographically random integer in [lo, hi]
+// (inclusive on both ends).
+func randomIntInRange(lo, hi int) (int, error) {
+	if lo == hi {
+		return lo, nil
+	}
+	span := big.NewInt(int64(hi-lo) + 1)
+	n, err := rand.Int(rand.Reader, span)
+	if err != nil {
+		return 0, err
+	}
+	return lo + int(n.Int64()), nil
 }
 
 // Unmarshal decodes a Garlic Envelope from its wire format. It never trusts

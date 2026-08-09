@@ -45,6 +45,17 @@ type Config struct {
 	RateBurst            float64
 	MaxTrackedPeers      int
 	CapabilityTimeout    time.Duration
+
+	// PaddingEnabled controls per-hop packet size randomization (see
+	// Envelope.PadToRandomRange's doc comment): both the originator and
+	// every relay independently re-randomize the wire size of the
+	// envelope they send within [MinPaddedSize, MaxPaddedSize], so a
+	// given hop-to-hop link's packet sizes don't match the sizes seen on
+	// the next link - a defense against size-based traffic correlation
+	// (docs/garlic-threat-model.md, "Traffic correlation").
+	PaddingEnabled bool
+	MinPaddedSize  int
+	MaxPaddedSize  int
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -63,6 +74,9 @@ func DefaultConfig() Config {
 		RateBurst:            200,
 		MaxTrackedPeers:      4096,
 		CapabilityTimeout:    6 * time.Second,
+		PaddingEnabled:       true,
+		MinPaddedSize:        512,
+		MaxPaddedSize:        1400,
 	}
 }
 
@@ -301,24 +315,43 @@ func (g *Garlic) SendGarlic(id CircuitID, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
+	msg, err := buildCircuitDataMessage(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	if err != nil {
+		return err
+	}
+
+	_, err = g.core.WriteGarlic(msg, iwt.Addr(firstHop))
+	return err
+}
+
+// buildCircuitDataMessage assembles the wire message for one circuitData
+// packet: msgTypeCircuitData || ephemeralPub || Envelope. It performs no
+// I/O, so it's testable without a running core.Core - see protocol.go's
+// doc comment on why the pure/I/O split matters here. If cfg.PaddingEnabled,
+// the envelope's wire size is independently re-randomized per call (see
+// Envelope.PadToRandomRange); a padding failure (e.g. misconfigured
+// Min/MaxPaddedSize) degrades to unpadded rather than failing the send.
+func buildCircuitDataMessage(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
 		CircuitID:     uint64(id),
 		PacketCounter: counter,
-		Expiration:    uint64(time.Now().Add(g.cfg.PacketTTL).Unix()),
+		Expiration:    expiration,
 		Body:          onion,
+	}
+	if cfg.PaddingEnabled {
+		_ = env.PadToRandomRange(cfg.MinPaddedSize, cfg.MaxPaddedSize)
 	}
 	envBytes, err := env.Marshal()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	msg := make([]byte, 0, 1+len(ephemeralPub)+len(envBytes))
 	msg = append(msg, msgTypeCircuitData)
 	msg = append(msg, ephemeralPub...)
 	msg = append(msg, envBytes...)
-
-	_, err = g.core.WriteGarlic(msg, iwt.Addr(firstHop))
-	return err
+	return msg, nil
 }
 
 // RecvGarlic waits up to timeout for the next payload delivered to this
