@@ -111,6 +111,36 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			return map[string]interface{}{}, nil
 		})
 
+	_ = a.AddHandler("sendGarlicBundled", "Send a hex-encoded payload alongside coverCount indistinguishable cover entries in one bundle", []string{"circuitId", "payload", "[coverCount]"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				CircuitID  string `json:"circuitId"`
+				Payload    string `json:"payload"`
+				CoverCount string `json:"coverCount"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			id, err := circuitIDFromString(req.CircuitID)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := hex.DecodeString(req.Payload)
+			if err != nil {
+				return nil, fmt.Errorf("invalid payload: %w", err)
+			}
+			coverCount := 0
+			if req.CoverCount != "" {
+				if _, err := fmt.Sscanf(req.CoverCount, "%d", &coverCount); err != nil {
+					return nil, fmt.Errorf("invalid coverCount: %w", err)
+				}
+			}
+			if err := g.SendGarlicBundled(id, payload, coverCount); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{}, nil
+		})
+
 	_ = a.AddHandler("recvGarlic", "Wait for the next payload delivered to this node as a circuit's final hop", []string{"[timeoutSeconds]"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {

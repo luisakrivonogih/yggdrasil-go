@@ -24,6 +24,7 @@ const (
 	msgTypeCapabilityResponse
 	msgTypeCircuitData
 	msgTypeAnnounce
+	msgTypeCircuitDataBundle
 )
 
 // circuitDataMinSize is the minimum length of a circuitData message body
@@ -149,6 +150,35 @@ func (g *Garlic) processAnnounce(body []byte) {
 		}
 		g.discovery.record(DiscoveredPeer{NodeKey: p.NodeKey, GarlicPublicKey: p.GarlicPublicKey})
 	}
+}
+
+// processCircuitDataBundle decides what to do with the body of a
+// msgTypeCircuitDataBundle message: a Bundle whose entries are each
+// shaped like a circuitData body (ephemeralPub || Envelope). Every entry
+// is run through the exact same processCircuitData used for a
+// non-bundled message - no new cryptography, no weaker guarantees - so
+// a cover entry (random bytes, indistinguishable in shape from a real
+// one) simply fails to decrypt and drops silently, exactly as a
+// corrupted or misdirected message already does. This is what makes a
+// bundle a real "garlic" rather than a single onion stream: an observer
+// who can't decrypt any entry has no way to tell how many of them, if
+// any, are real. See docs/garlic-protocol.md §7 and Bundle's own doc
+// comment. Returns every non-drop action found, in bundle order; a
+// caller acts on each independently (deliver locally, or forward - to
+// potentially different next hops, since bundled entries need not
+// belong to the same circuit).
+func (g *Garlic) processCircuitDataBundle(body []byte) []circuitAction {
+	bundle, err := UnmarshalBundle(body)
+	if err != nil {
+		return nil
+	}
+	var actions []circuitAction
+	for _, sub := range bundle.Messages {
+		if action := g.processCircuitData(sub); action.kind != actionDrop {
+			actions = append(actions, action)
+		}
+	}
+	return actions
 }
 
 // processCapabilityRequest returns the marshaled CapabilityMessage this

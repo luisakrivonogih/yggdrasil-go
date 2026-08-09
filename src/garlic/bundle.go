@@ -110,3 +110,19 @@ func (b *Bundle) AddCoverMessage(size int) error {
 	b.Messages = append(b.Messages, cover)
 	return nil
 }
+
+// shuffleBundleMessages randomizes b.Messages' order in place (Fisher-
+// Yates), so a real entry mixed in with AddCoverMessage output doesn't
+// sit at a fixed, guessable position (e.g. always first). Not a
+// correctness requirement - entries are already indistinguishable
+// without decryption regardless of order - but cheap defense in depth.
+func shuffleBundleMessages(b *Bundle) error {
+	for i := len(b.Messages) - 1; i > 0; i-- {
+		j, err := randomIntInRange(0, i)
+		if err != nil {
+			return err
+		}
+		b.Messages[i], b.Messages[j] = b.Messages[j], b.Messages[i]
+	}
+	return nil
+}

@@ -111,3 +111,40 @@ func TestBundleAddCoverMessageRejectsWhenFull(t *testing.T) {
 		t.Fatal("expected error adding a cover message to a full bundle, got nil")
 	}
 }
+
+func TestShuffleBundleMessagesPreservesAllEntries(t *testing.T) {
+	b := &Bundle{Messages: [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d")}}
+	if err := shuffleBundleMessages(b); err != nil {
+		t.Fatalf("shuffleBundleMessages returned error: %v", err)
+	}
+	if len(b.Messages) != 4 {
+		t.Fatalf("len(Messages) = %d, want 4", len(b.Messages))
+	}
+	seen := map[string]bool{}
+	for _, m := range b.Messages {
+		seen[string(m)] = true
+	}
+	for _, want := range []string{"a", "b", "c", "d"} {
+		if !seen[want] {
+			t.Errorf("entry %q missing after shuffle", want)
+		}
+	}
+}
+
+func TestShuffleBundleMessagesProducesVariety(t *testing.T) {
+	orders := map[string]bool{}
+	for range 50 {
+		b := &Bundle{Messages: [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e")}}
+		if err := shuffleBundleMessages(b); err != nil {
+			t.Fatalf("shuffleBundleMessages returned error: %v", err)
+		}
+		var order []byte
+		for _, m := range b.Messages {
+			order = append(order, m[0])
+		}
+		orders[string(order)] = true
+	}
+	if len(orders) < 2 {
+		t.Fatalf("got %d distinct order(s) across 50 shuffles, want variety", len(orders))
+	}
+}

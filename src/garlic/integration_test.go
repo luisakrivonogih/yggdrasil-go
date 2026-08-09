@@ -416,6 +416,67 @@ func TestIntegrationMultipathSpreadsTraffic(t *testing.T) {
 	}
 }
 
+// TestIntegrationSendGarlicBundledDeliversAmongCover proves
+// SendGarlicBundled's real entry survives a real mesh trip - decrypt,
+// replay-window, and forward logic all still fire correctly - while
+// mixed in with cover entries that the receiving hop must (and does)
+// silently fail to decrypt and discard, exactly once, with no
+// duplicate/garbage deliveries.
+func TestIntegrationSendGarlicBundledDeliversAmongCover(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	capB := waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+
+	circuitID, err := gA.CreateCircuit([]garlic.CapabilityMessage{*capB}, [][]byte{nodeB.PublicKey()})
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+
+	payload := []byte("hello bob, hidden among cover traffic")
+	if err := gA.SendGarlicBundled(circuitID, payload, 5); err != nil {
+		t.Fatalf("SendGarlicBundled returned error: %v", err)
+	}
+
+	delivered, err := gB.RecvGarlic(20 * time.Second)
+	if err != nil {
+		t.Fatalf("RecvGarlic returned error: %v", err)
+	}
+	if !bytes.Equal(delivered.Payload, payload) {
+		t.Fatalf("delivered payload = %q, want %q", delivered.Payload, payload)
+	}
+
+	// Nothing else should ever arrive: the 5 cover entries must never
+	// decrypt into a delivery.
+	if extra, err := gB.RecvGarlic(500 * time.Millisecond); err == nil {
+		t.Fatalf("unexpected second delivery: %+v", extra)
+	}
+}
+
 func countDelivered(t *testing.T, g *garlic.Garlic, want int, maxWait time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(maxWait)

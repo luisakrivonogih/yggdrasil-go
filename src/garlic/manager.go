@@ -355,18 +355,27 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 	case msgTypeCapabilityResponse:
 		g.handleCapabilityResponse(from, data[1:])
 	case msgTypeCircuitData:
-		action := g.processCircuitData(data[1:])
-		switch action.kind {
-		case actionDeliver:
-			select {
-			case g.delivered <- DeliveredMessage{CircuitID: action.circuitID, Payload: action.payload}:
-			default:
-			}
-		case actionForward:
-			g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
-		}
+		g.dispatchAction(g.processCircuitData(data[1:]))
 	case msgTypeAnnounce:
 		g.processAnnounce(data[1:])
+	case msgTypeCircuitDataBundle:
+		for _, action := range g.processCircuitDataBundle(data[1:]) {
+			g.dispatchAction(action)
+		}
+	}
+}
+
+// dispatchAction carries out a single circuitAction: deliver locally, or
+// forward to the next hop. actionDrop is a no-op (nothing to do).
+func (g *Garlic) dispatchAction(action circuitAction) {
+	switch action.kind {
+	case actionDeliver:
+		select {
+		case g.delivered <- DeliveredMessage{CircuitID: action.circuitID, Payload: action.payload}:
+		default:
+		}
+	case actionForward:
+		g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
 	}
 }
 
@@ -614,6 +623,65 @@ func (g *Garlic) SendGarlic(id CircuitID, payload []byte) error {
 	return nil
 }
 
+// SendGarlicMaxCoverMessages bounds the coverCount parameter to
+// SendGarlicBundled, leaving room in the same MaxBundleMessages limit
+// Bundle.Marshal itself enforces (see bundle.go) for the one real
+// message every call also includes.
+const SendGarlicMaxCoverMessages = MaxBundleMessages - 1
+
+// SendGarlicBundled behaves like SendGarlic, but sends the real
+// circuitData alongside coverCount cover entries (random bytes, sized
+// like a real entry) in one Bundle - see processCircuitDataBundle's doc
+// comment for why an observer, or even the receiving hop itself before
+// it attempts decryption, cannot tell which bundled entry (if any) is
+// real. coverCount is clamped to SendGarlicMaxCoverMessages.
+func (g *Garlic) SendGarlicBundled(id CircuitID, payload []byte, coverCount int) error {
+	if coverCount > SendGarlicMaxCoverMessages {
+		coverCount = SendGarlicMaxCoverMessages
+	}
+	if coverCount < 0 {
+		coverCount = 0
+	}
+
+	c, ok := g.circuits.Get(id)
+	if !ok {
+		return ErrCircuitNotFound
+	}
+	g.mu.Lock()
+	ephemeralPub := g.originEphemeral[id]
+	g.mu.Unlock()
+	if ephemeralPub == nil {
+		return ErrCircuitNotFound
+	}
+
+	onion, firstHop, counter, err := c.Seal(payload)
+	if err != nil {
+		return err
+	}
+	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
+	realEntry, err := buildCircuitDataBody(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	if err != nil {
+		return err
+	}
+
+	bundle := &Bundle{Messages: [][]byte{realEntry}}
+	for range coverCount {
+		if err := bundle.AddCoverMessage(len(realEntry)); err != nil {
+			break // a full/oversized bundle still sends the real entry alone
+		}
+	}
+	if err := shuffleBundleMessages(bundle); err != nil {
+		return err
+	}
+	body, err := bundle.Marshal()
+	if err != nil {
+		return err
+	}
+
+	g.sendCircuitData(append([]byte{msgTypeCircuitDataBundle}, body...), iwt.Addr(firstHop))
+	return nil
+}
+
 // buildCircuitDataMessage assembles the wire message for one circuitData
 // packet: msgTypeCircuitData || ephemeralPub || Envelope. It performs no
 // I/O, so it's testable without a running core.Core - see protocol.go's
@@ -622,6 +690,20 @@ func (g *Garlic) SendGarlic(id CircuitID, payload []byte) error {
 // Envelope.PadToRandomRange); a padding failure (e.g. misconfigured
 // Min/MaxPaddedSize) degrades to unpadded rather than failing the send.
 func buildCircuitDataMessage(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
+	body, err := buildCircuitDataBody(ephemeralPub, id, counter, expiration, onion, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{msgTypeCircuitData}, body...), nil
+}
+
+// buildCircuitDataBody builds a circuitData message body - ephemeralPub
+// || Envelope - without the leading msgTypeCircuitData byte. This is the
+// exact shape processCircuitData (and, by extension, a Bundle entry in a
+// msgTypeCircuitDataBundle message - see processCircuitDataBundle)
+// expects; buildCircuitDataMessage is this plus the type byte, for a
+// standalone (non-bundled) send.
+func buildCircuitDataBody(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
 		CircuitID:     uint64(id),
@@ -636,11 +718,10 @@ func buildCircuitDataMessage(ephemeralPub []byte, id CircuitID, counter, expirat
 	if err != nil {
 		return nil, err
 	}
-	msg := make([]byte, 0, 1+len(ephemeralPub)+len(envBytes))
-	msg = append(msg, msgTypeCircuitData)
-	msg = append(msg, ephemeralPub...)
-	msg = append(msg, envBytes...)
-	return msg, nil
+	body := make([]byte, 0, len(ephemeralPub)+len(envBytes))
+	body = append(body, ephemeralPub...)
+	body = append(body, envBytes...)
+	return body, nil
 }
 
 // RecvGarlic waits up to timeout for the next payload delivered to this
