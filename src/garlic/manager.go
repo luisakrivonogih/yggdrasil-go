@@ -746,20 +746,38 @@ func (g *Garlic) RecvGarlic(timeout time.Duration) (*DeliveredMessage, error) {
 	}
 }
 
-// PublishService advertises this node's identity as reachable at
-// introPoints for serviceID, returning the resulting GID.
+// PublishService signs and advertises this node's identity as reachable
+// at introPoints for serviceID, returning the resulting GID. The
+// descriptor is signed with this node's Garlic signing identity
+// (Identity.SigningPrivateKey), never the X25519 circuit-hop key.
 func (g *Garlic) PublishService(serviceID []byte, introPoints []IntroPoint, ttl time.Duration) (GID, error) {
-	gid := ComputeGID(g.identity.PublicKey, serviceID)
-	if err := g.rendezvous.Publish(gid, introPoints, ttl); err != nil {
+	gid := ComputeGID(g.identity.SigningPublicKey, serviceID)
+	now := uint64(time.Now().Unix())
+	descriptor, err := SignServiceDescriptor(g.identity.SigningPublicKey, g.identity.SigningPrivateKey, serviceID, introPoints, now, now+uint64(ttl.Seconds()))
+	if err != nil {
+		return GID{}, err
+	}
+	if err := g.rendezvous.Publish(gid, descriptor); err != nil {
 		return GID{}, err
 	}
 	return gid, nil
 }
 
 // LookupService returns the currently-published introduction points for
-// gid.
+// gid, after verifying the descriptor the rendezvous returned actually
+// matches gid, is validly signed, and is not expired (VerifyServiceDescriptor)
+// - a malicious or buggy rendezvous cannot make this return
+// attacker-controlled introduction points for a GID it doesn't hold the
+// signing key for.
 func (g *Garlic) LookupService(gid GID) ([]IntroPoint, error) {
-	return g.rendezvous.Lookup(gid)
+	descriptor, err := g.rendezvous.Lookup(gid)
+	if err != nil {
+		return nil, err
+	}
+	if err := VerifyServiceDescriptor(descriptor, gid, uint64(time.Now().Unix())); err != nil {
+		return nil, err
+	}
+	return descriptor.IntroPoints, nil
 }
 
 // Stats summarizes a Garlic instance's current state, for GetStats.
