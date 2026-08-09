@@ -21,6 +21,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
@@ -56,6 +57,16 @@ type Config struct {
 	PaddingEnabled bool
 	MinPaddedSize  int
 	MaxPaddedSize  int
+
+	// JitterEnabled controls random delay before actually transmitting a
+	// circuitData packet (origin send or relay forward), independently
+	// re-rolled per packet - the timing half of the traffic-correlation
+	// defense described on PaddingEnabled. Delivered via a bounded
+	// worker pool (jitter.go), never by blocking the caller.
+	JitterEnabled   bool
+	MinJitter       time.Duration
+	MaxJitter       time.Duration
+	JitterQueueSize int
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -77,8 +88,17 @@ func DefaultConfig() Config {
 		PaddingEnabled:       true,
 		MinPaddedSize:        512,
 		MaxPaddedSize:        1400,
+		JitterEnabled:        true,
+		MinJitter:            0,
+		MaxJitter:            75 * time.Millisecond,
+		JitterQueueSize:      1024,
 	}
 }
+
+// jitterWorkers is the fixed size of the jitter scheduler's worker pool.
+// Not exposed in Config: it bounds concurrency, not memory, and the
+// queue size is the DoS-relevant knob.
+const jitterWorkers = 16
 
 var (
 	ErrInvalidPath       = errors.New("garlic: invalid circuit path")
@@ -106,6 +126,7 @@ type Garlic struct {
 	relayState *relayCircuitState
 	limiter    *RateLimiter
 	rendezvous Rendezvous
+	scheduler  *jitterScheduler
 
 	delivered chan DeliveredMessage
 
@@ -137,16 +158,39 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		originEphemeral: make(map[CircuitID][]byte),
 		stop:            make(chan struct{}),
 	}
+	g.scheduler = newJitterScheduler(func(data []byte, addr net.Addr) error {
+		_, err := c.WriteGarlic(data, addr)
+		return err
+	}, cfg.JitterQueueSize, jitterWorkers)
 	c.SetGarlicHandler(g.handleIncoming)
 	go g.cleanupLoop()
 	return g
 }
 
 // Close unregisters from core.Core and stops the background cleanup
-// loop. It does not close the underlying core.Core.
+// loop and the jitter scheduler. It does not close the underlying
+// core.Core.
 func (g *Garlic) Close() {
 	g.core.SetGarlicHandler(nil)
+	g.scheduler.Stop()
 	close(g.stop)
+}
+
+// sendCircuitData transmits a circuitData wire message to addr, applying
+// Config.JitterEnabled's random delay if configured. A jitter computation
+// or scheduling failure falls back to sending immediately, so a
+// misconfiguration degrades to unjittered delivery rather than dropping
+// an otherwise-valid packet.
+func (g *Garlic) sendCircuitData(msg []byte, addr net.Addr) {
+	var delay time.Duration
+	if g.cfg.JitterEnabled {
+		if d, err := randomJitter(g.cfg.MinJitter, g.cfg.MaxJitter); err == nil {
+			delay = d
+		}
+	}
+	if !g.scheduler.enqueue(msg, addr, delay) {
+		_, _ = g.core.WriteGarlic(msg, addr)
+	}
 }
 
 func (g *Garlic) cleanupLoop() {
@@ -194,7 +238,7 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 			default:
 			}
 		case actionForward:
-			_, _ = g.core.WriteGarlic(action.forwardMsg, iwt.Addr(action.forwardTo))
+			g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
 		}
 	}
 }
@@ -297,8 +341,12 @@ func (g *Garlic) CloseCircuit(id CircuitID) {
 	g.mu.Unlock()
 }
 
-// SendGarlic sends payload as one packet over the circuit id (previously
-// created with CreateCircuit).
+// SendGarlic seals payload as one packet over the circuit id (previously
+// created with CreateCircuit) and hands it to the jitter scheduler for
+// transmission. A returned nil error means the packet was successfully
+// sealed and queued (or sent immediately, if Config.JitterEnabled is
+// false) - not that the first hop has received it, since
+// Config.JitterEnabled delays the actual send.
 func (g *Garlic) SendGarlic(id CircuitID, payload []byte) error {
 	c, ok := g.circuits.Get(id)
 	if !ok {
@@ -321,8 +369,8 @@ func (g *Garlic) SendGarlic(id CircuitID, payload []byte) error {
 		return err
 	}
 
-	_, err = g.core.WriteGarlic(msg, iwt.Addr(firstHop))
-	return err
+	g.sendCircuitData(msg, iwt.Addr(firstHop))
+	return nil
 }
 
 // buildCircuitDataMessage assembles the wire message for one circuitData

@@ -316,6 +316,16 @@ func main() {
 			gcfg.MaxCircuits = cfg.Garlic.MaxCircuits
 			gcfg.MaxCircuitsPerPeer = cfg.Garlic.MaxCircuitsPerPeer
 			gcfg.MaxRelayCircuits = cfg.Garlic.MaxRelayCircuits
+			gcfg.PaddingEnabled = cfg.Garlic.Padding.Enabled
+			gcfg.MinPaddedSize = cfg.Garlic.Padding.MinSize
+			gcfg.MaxPaddedSize = cfg.Garlic.Padding.MaxSize
+			gcfg.JitterEnabled = cfg.Garlic.Jitter.Enabled
+			if gcfg.MinJitter, err = time.ParseDuration(cfg.Garlic.Jitter.MinDelay); err != nil {
+				panic(fmt.Sprintf("invalid Garlic.Jitter.MinDelay %q: %v", cfg.Garlic.Jitter.MinDelay, err))
+			}
+			if gcfg.MaxJitter, err = time.ParseDuration(cfg.Garlic.Jitter.MaxDelay); err != nil {
+				panic(fmt.Sprintf("invalid Garlic.Jitter.MaxDelay %q: %v", cfg.Garlic.Jitter.MaxDelay, err))
+			}
 			n.garlic = garlic.New(n.core, identity, gcfg, garlic.NewStaticRendezvous())
 			logger.Printf("Your Garlic public key is %s", hex.EncodeToString(identity.PublicKey))
 			if n.admin != nil {

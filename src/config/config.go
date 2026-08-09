@@ -62,13 +62,27 @@ type NodeConfig struct {
 // Overlay (see docs/garlic-architecture.md). The zero value (Enabled:
 // false) means vanilla Yggdrasil behavior.
 type GarlicConfig struct {
-	Enabled            bool     `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
-	PrivateKey         KeyBytes `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
-	PathLength         int      `comment:"Number of hops for circuits this node originates."`
-	CircuitLifetime    string   `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
-	MaxCircuits        int      `comment:"Maximum number of circuits this node will originate at once."`
-	MaxCircuitsPerPeer int      `comment:"Maximum number of originated circuits through any single first-hop\npeer at once."`
-	MaxRelayCircuits   int      `comment:"Maximum number of other nodes' circuits this node will relay at once."`
+	Enabled            bool                `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
+	PrivateKey         KeyBytes            `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
+	PathLength         int                 `comment:"Number of hops for circuits this node originates."`
+	CircuitLifetime    string              `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
+	MaxCircuits        int                 `comment:"Maximum number of circuits this node will originate at once."`
+	MaxCircuitsPerPeer int                 `comment:"Maximum number of originated circuits through any single first-hop\npeer at once."`
+	MaxRelayCircuits   int                 `comment:"Maximum number of other nodes' circuits this node will relay at once."`
+	Padding            GarlicPaddingConfig `comment:"Per-hop packet size randomization: the originator and every relay\nindependently pick a new random wire size within [MinSize, MaxSize]\nfor each packet, so a hop-to-hop link's packet sizes don't match\nthose on the next link - see docs/garlic-threat-model.md's\ndiscussion of traffic correlation."`
+	Jitter             GarlicJitterConfig  `comment:"Random delay before actually transmitting a circuit packet (origin\nsend or relay forward), independently re-rolled per packet - the\ntiming half of the same traffic-correlation defense as Padding."`
+}
+
+type GarlicPaddingConfig struct {
+	Enabled bool `comment:"Enables per-hop packet size randomization. Default is true."`
+	MinSize int  `comment:"Minimum padded packet size in bytes."`
+	MaxSize int  `comment:"Maximum padded packet size in bytes."`
+}
+
+type GarlicJitterConfig struct {
+	Enabled  bool   `comment:"Enables random pre-send delay. Default is true."`
+	MinDelay string `comment:"Minimum delay before sending (Go duration format, e.g. \"0s\")."`
+	MaxDelay string `comment:"Maximum delay before sending (Go duration format, e.g. \"75ms\")."`
 }
 
 type MulticastInterfaceConfig struct {
@@ -105,6 +119,16 @@ func GenerateConfig() *NodeConfig {
 		MaxCircuits:        1024,
 		MaxCircuitsPerPeer: 64,
 		MaxRelayCircuits:   4096,
+		Padding: GarlicPaddingConfig{
+			Enabled: true,
+			MinSize: 512,
+			MaxSize: 1400,
+		},
+		Jitter: GarlicJitterConfig{
+			Enabled:  true,
+			MinDelay: "0s",
+			MaxDelay: "75ms",
+		},
 	}
 	if err := cfg.postprocessConfig(); err != nil {
 		panic(err)

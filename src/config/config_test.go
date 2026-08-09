@@ -35,6 +35,22 @@ func TestGarlicConfigDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestGarlicConfigPaddingAndJitterDefaults(t *testing.T) {
+	cfg := GenerateConfig()
+	if !cfg.Garlic.Padding.Enabled {
+		t.Error("Garlic.Padding.Enabled = false by default, want true")
+	}
+	if cfg.Garlic.Padding.MinSize <= 0 || cfg.Garlic.Padding.MaxSize <= cfg.Garlic.Padding.MinSize {
+		t.Errorf("Garlic.Padding min/max = %d/%d, want 0 < min < max", cfg.Garlic.Padding.MinSize, cfg.Garlic.Padding.MaxSize)
+	}
+	if !cfg.Garlic.Jitter.Enabled {
+		t.Error("Garlic.Jitter.Enabled = false by default, want true")
+	}
+	if cfg.Garlic.Jitter.MaxDelay == "" {
+		t.Error("Garlic.Jitter.MaxDelay is empty by default")
+	}
+}
+
 // A config file written before the Garlic block existed must keep
 // working, and must not silently enable an experimental feature it
 // never mentioned.
