@@ -92,7 +92,7 @@ func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration
 	if err != nil {
 		return nil, err
 	}
-	key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
+	key, err := deriveLayerKey(secret)
 	if err != nil {
 		return nil, err
 	}
