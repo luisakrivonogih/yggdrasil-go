@@ -10,6 +10,46 @@ allows pretty much any IPv6-capable application to communicate securely with
 other Yggdrasil nodes. Yggdrasil does not require you to have IPv6 Internet
 connectivity - it also works over IPv4.
 
+## Garlic Routing Overlay (experimental, this branch)
+
+This branch adds an experimental, optional privacy-enhanced routing layer on
+top of Yggdrasil: onion/garlic-style circuits, capability negotiation,
+per-hop packet-size and timing randomization, gossip-based peer discovery,
+topologically diverse hop selection, multipath circuits, and cover-traffic
+bundling. It is fully backward compatible - a node with `Garlic.Enabled:
+false` (the default) behaves exactly like vanilla Yggdrasil, and ordinary
+Yggdrasil nodes transparently carry Garlic traffic without needing to know
+it exists or upgrading anything.
+
+Start here:
+
+- [docs/garlic-architecture.md](docs/garlic-architecture.md) - design and integration rationale
+- [docs/garlic-protocol.md](docs/garlic-protocol.md) - wire format, what's actually implemented
+- [docs/garlic-threat-model.md](docs/garlic-threat-model.md) - what this does and does not protect against (read before relying on it for anything)
+- [docs/garlic-security.md](docs/garlic-security.md) - self-review of the implementation
+- [docs/garlic-compatibility.md](docs/garlic-compatibility.md) - why old and new nodes keep interoperating
+- [docs/garlic-testing.md](docs/garlic-testing.md) - manual walkthrough via `yggdrasilctl`
+
+### Quick install for testing
+
+To build, package, install, and enable Garlic on a Linux server in one
+step (auto-detects Debian/Ubuntu-family `apt`/`.deb` vs Fedora/RHEL/CentOS-family
+`dnf`/`yum`/`.rpm`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/luisakrivonogih/yggdrasil-go/develop/install.sh | sudo sh
+```
+
+This builds an actual `.deb` or `.rpm` from source, installs it the same
+way the official packages install (systemd service,
+`/etc/yggdrasil/yggdrasil.conf`), sets `Garlic.Enabled: true` in the
+generated config, restarts the service, and prints the resulting Garlic
+identity and stats so you can confirm it actually started. See
+[install.sh](install.sh) for the environment variables it honors
+(`REPO_URL`, `REPO_BRANCH`, `WORKDIR`, `ENABLE_GARLIC`), and
+[docs/garlic-testing.md](docs/garlic-testing.md) for how to build a circuit
+and send traffic through it once the service is running.
+
 ## Supported Platforms
 
 Yggdrasil works on a number of platforms, including Linux, macOS, Ubiquiti

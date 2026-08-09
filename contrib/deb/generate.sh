@@ -11,8 +11,8 @@ then
 fi
 
 PKGBRANCH=$(basename `git name-rev --name-only HEAD`)
-PKGNAME=$(sh contrib/semver/name.sh)
-PKGVERSION=$(sh contrib/semver/version.sh --bare)
+PKGNAME=${PKGNAME:-$(sh contrib/semver/name.sh)}
+PKGVERSION=${PKGVERSION:-$(sh contrib/semver/version.sh --bare)}
 PKGARCH=${PKGARCH-amd64}
 PKGFILE=$PKGNAME-$PKGVERSION-$PKGARCH.deb
 PKGREPLACES=yggdrasil
