@@ -88,7 +88,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	if err != nil {
 		return circuitAction{kind: actionDrop}
 	}
-	key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
+	key, err := deriveLayerKey(secret)
 	if err != nil {
 		return circuitAction{kind: actionDrop}
 	}
@@ -103,6 +103,12 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 
 	if len(layer.NextHop) == 0 {
 		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner}
+	}
+	if len(layer.NextHopEphemeral) != KeySize {
+		// A well-formed intermediate layer always carries the next hop's
+		// ephemeral key; anything else is malformed or malicious input,
+		// treated identically to any other unforwardable message.
+		return circuitAction{kind: actionDrop}
 	}
 
 	nextEnv := &Envelope{
@@ -125,7 +131,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	}
 	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
 	forwardMsg = append(forwardMsg, msgTypeCircuitData)
-	forwardMsg = append(forwardMsg, ephemeralPub...)
+	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
 
 	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}

@@ -487,21 +487,32 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 	if len(path) == 0 || len(path) != len(nodeKeys) {
 		return CircuitID{}, ErrInvalidPath
 	}
-	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
-	if err != nil {
-		return CircuitID{}, err
+
+	ephemeralPubs := make([][]byte, len(path))
+	ephemeralPrivs := make([][]byte, len(path))
+	for i := range path {
+		pub, priv, err := GenerateKeypair()
+		if err != nil {
+			return CircuitID{}, err
+		}
+		ephemeralPubs[i], ephemeralPrivs[i] = pub, priv
 	}
+
 	hops := make([]Hop, len(path))
 	for i := range path {
-		secret, err := ECDH(ephemeralPriv, path[i].PublicKey)
+		secret, err := ECDH(ephemeralPrivs[i], path[i].PublicKey)
 		if err != nil {
 			return CircuitID{}, err
 		}
-		key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
+		key, err := deriveLayerKey(secret)
 		if err != nil {
 			return CircuitID{}, err
 		}
-		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key}
+		var nextEphemeral []byte
+		if i+1 < len(path) {
+			nextEphemeral = ephemeralPubs[i+1]
+		}
+		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key, NextEphemeralPub: nextEphemeral}
 	}
 
 	c, err := g.circuits.Add(hops, g.cfg.CircuitLifetime, g.cfg.MaxPacketsPerCircuit, g.cfg.MaxBytesPerCircuit)
@@ -510,7 +521,7 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 	}
 
 	g.mu.Lock()
-	g.originEphemeral[c.ID] = ephemeralPub
+	g.originEphemeral[c.ID] = ephemeralPubs[0]
 	g.mu.Unlock()
 	return c.ID, nil
 }

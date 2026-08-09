@@ -14,21 +14,34 @@ import (
 // feed realistic input to processCircuitData without a real core.Core.
 func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys [][]byte, payload []byte, ttl time.Duration) (body []byte, circuitID CircuitID) {
 	t.Helper()
-	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
-	if err != nil {
-		t.Fatalf("GenerateKeypair returned error: %v", err)
+	// Mirrors Garlic.CreateCircuit: one independent ephemeral keypair per
+	// hop, chained via NextEphemeralPub, rather than one keypair reused
+	// for the whole path - see linkability_test.go for what this chain
+	// exists to prevent.
+	ephemeralPubs := make([][]byte, len(relayIdentities))
+	ephemeralPrivs := make([][]byte, len(relayIdentities))
+	for i := range relayIdentities {
+		pub, priv, err := GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair returned error: %v", err)
+		}
+		ephemeralPubs[i], ephemeralPrivs[i] = pub, priv
 	}
 	hops := make([]Hop, len(relayIdentities))
 	for i, id := range relayIdentities {
-		secret, err := ECDH(ephemeralPriv, id.PublicKey)
+		secret, err := ECDH(ephemeralPrivs[i], id.PublicKey)
 		if err != nil {
 			t.Fatalf("ECDH returned error: %v", err)
 		}
-		key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
+		key, err := deriveLayerKey(secret)
 		if err != nil {
-			t.Fatalf("DeriveKey returned error: %v", err)
+			t.Fatalf("deriveLayerKey returned error: %v", err)
 		}
-		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key}
+		var nextEphemeral []byte
+		if i+1 < len(relayIdentities) {
+			nextEphemeral = ephemeralPubs[i+1]
+		}
+		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key, NextEphemeralPub: nextEphemeral}
 	}
 	c, err := NewCircuit(hops, time.Minute, 100, 100000)
 	if err != nil {
@@ -49,7 +62,7 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
 	}
-	body = append(append([]byte(nil), ephemeralPub...), envBytes...)
+	body = append(append([]byte(nil), ephemeralPubs[0]...), envBytes...)
 	return body, c.ID
 }
 
