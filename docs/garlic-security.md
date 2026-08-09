@@ -66,20 +66,35 @@ who can gain that same visibility.
 
 ## Timing leakage
 
-Not actively mitigated. `SendGarlic` sends immediately; there is no
-jitter, batching, or fixed-interval sending. This is explicit in
-`docs/garlic-threat-model.md`'s "global passive adversary" and "traffic
-correlation" sections.
+Partially mitigated, default on. `Garlic.sendCircuitData` (both the
+originator's `SendGarlic`/`SendGarlicBundled` path and every relay's
+forward path in `processCircuitData`) routes every send through
+`src/garlic/jitter.go`'s bounded worker-pool scheduler, delaying actual
+transmission by an amount drawn uniformly from `[Config.MinJitter,
+Config.MaxJitter]` (default `[0, 75ms]`), independently re-rolled per
+packet. This is not batching or fixed-interval sending — it's
+per-packet randomized delay — so it raises the cost of exact
+send-timestamp correlation across hops without providing the stronger
+guarantees a real mix would. See `docs/garlic-threat-model.md`'s
+"Traffic correlation" section for what this does and does not defend
+against, and jitter.go's doc comment for why it's built as a
+non-blocking bounded scheduler rather than a simple `time.Sleep`
+(relay forwarding runs synchronously inside `core.Core.ReadFrom`'s read
+loop and must never block it).
 
 ## Packet size leakage
 
-`Envelope.PadTo` and `Bundle.AddCoverMessage` exist and are tested
-(`docs/garlic-protocol.md` §7) but are **not called by `SendGarlic`** in
-this version — packets sent today are exactly the size of their
-(unpadded) content. This is the single highest-value near-term follow-up
-for traffic-analysis resistance: wiring `PadTo` into `SendGarlic`
-using `Config`'s (currently unused for this purpose) cell-size concept
-requires no new cryptography, just plumbing.
+Mitigated, default on. `Envelope.PadToRandomRange(MinPaddedSize,
+MaxPaddedSize)` (default `[512, 1400]` bytes) is called by
+`buildCircuitDataBody` — shared by `SendGarlic`, `SendGarlicBundled`,
+and every relay's forward path in `processCircuitData` — whenever
+`Config.PaddingEnabled` (default true). Each of those three call sites
+re-rolls independently, so a packet's size on the link into a hop
+carries no information about its size on the link out of that hop.
+`Bundle.AddCoverMessage` (`docs/garlic-protocol.md` §7) is now also
+wired into the send path via `SendGarlicBundled`, letting a real
+message travel alongside indistinguishable cover entries — opt-in per
+call via `coverCount`, not automatic for every `SendGarlic` call.
 
 ## Route / destination leakage
 
@@ -188,12 +203,28 @@ traffic too; every branch in `handleIncoming` is O(1) bounded work.
 
 ## Sybil attacks
 
-Not mitigated — stated plainly in `docs/garlic-threat-model.md`. No
-reputation or diversity-weighted path selection exists in this version.
+Partially mitigated — `SelectDiversePath` (`src/garlic/selection.go`)
+and multipath pools (`src/garlic/multipath.go`) both raise the cost of
+the simplest Sybil strategies (see `docs/garlic-threat-model.md`'s
+Sybil section for the detailed breakdown). Neither is a general
+solution: there is still no reputation system, no resource cost to
+registering as a Garlic identity, and no IP/ASN diversity signal —
+tree position (spanning-tree parent, mesh hop count) is the only
+diversity signal available, and an adversary with genuinely diverse
+tree positions defeats it entirely.
 
 ## Intersection attacks
 
-Not mitigated — stated plainly in `docs/garlic-threat-model.md`.
+Narrowed by an architectural property, not a dedicated defense: every
+Garlic-capable node is structurally both a possible circuit originator
+and a relay for other nodes' circuits, so an adversary observing that a
+node sent/received Garlic traffic cannot, from that fact alone, tell
+whether it was the real endpoint or just relaying. See
+`docs/garlic-threat-model.md`'s Intersection attacks section for what
+this does and does not rule out — it is eroded by the same
+traffic-correlation limits discussed there, and there is no active
+circuit-rotation *policy* enforced by this codebase (only
+`Config.CircuitLifetime`'s upper bound).
 
 ## Malformed input handling
 
@@ -223,14 +254,23 @@ message type in the protocol at all (§8 of `docs/garlic-protocol.md`).
 
 ## Summary: what would most improve this implementation next
 
-In priority order, based on this review:
+Padding, jitter, discovery/gossip, diverse hop selection, multipath
+pools, and cover-traffic bundling (items 1 and 3 from the prior version
+of this list) are now implemented and described above. Remaining
+priority order:
 
-1. Wire `Envelope.PadTo`/`Bundle.AddCoverMessage` into the default send
-   path (packet-size leakage is currently the largest gap between
-   "implemented" and "designed for").
-2. Per-hop ephemeral keys (not one shared per circuit) to remove the
+1. Per-hop ephemeral keys (not one shared per circuit) to remove the
    relay-collusion linkability signal and improve forward secrecy.
-3. Sybil-resistant path selection once any automated hop-selection logic
-   is built (none exists yet — today a human or caller picks the path).
+2. IP/ASN-diversity-aware Sybil resistance — `SelectDiversePath`'s only
+   signal today is spanning-tree position, which a topologically
+   diverse adversary defeats; a real improvement needs a diversity
+   signal that doesn't itself leak relay operators' real IPs through
+   gossip (see `docs/garlic-threat-model.md`'s Sybil section for why
+   that tradeoff isn't free).
+3. A deliberate circuit-rotation policy (when to build a new circuit,
+   how much to relay for others as camouflage) to further narrow
+   intersection attacks — today only `Config.CircuitLifetime`'s upper
+   bound exists; there is no policy actively deciding *when* within
+   that bound to rotate.
 4. A distributed `Rendezvous` implementation, with its own threat-model
    pass first (`docs/garlic-rendezvous.md`).

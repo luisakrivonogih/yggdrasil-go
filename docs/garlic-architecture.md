@@ -495,17 +495,24 @@ so it isn't lost before that document exists:
   side ultimately learns which node key is answering for a GID unless the
   service itself is also relayed. Standard onion-routing limitation, not a
   Garlic-specific defect, but must be stated, not hidden.
-- **Packet-size and timing correlation** across relays remain possible until
-  §3.9's padding and (future) batching/jitter are actually implemented —
-  Phase 1 only reserves the fields/API for it (§3.11 `padding.cell_size`).
+- **Packet-size and timing correlation** across relays: this Phase 1
+  document originally deferred padding/batching/jitter to a future
+  phase. They have since been implemented (per-hop randomized padding
+  and send jitter, both default on) — see `docs/garlic-protocol.md` §9
+  and `docs/garlic-threat-model.md`'s "Traffic correlation" section for
+  what they actually raise the cost of, which is real but bounded, not
+  a defeat of this adversary class.
 - **Global passive adversary** watching enough of the mesh could attempt
   traffic-confirmation correlation between circuit hops; multi-hop relaying
   raises the cost but does not claim to defeat this class of adversary.
 - **Sybil relays**: since relay selection depends on capability-negotiation
   responses from nodes anyone can run, an adversary running many
-  Garlic-capable nodes can bias path selection toward itself. Mitigations
-  (diversity constraints, reputation, etc.) are explicitly deferred; not
-  solved by this design.
+  Garlic-capable nodes can bias path selection toward itself. This Phase 1
+  document deferred diversity/reputation mitigations; `SelectDiversePath`
+  and multipath pools (`docs/garlic-protocol.md` §10) now provide a
+  partial, tree-position-based mitigation — see
+  `docs/garlic-threat-model.md`'s Sybil section for what remains
+  unsolved (IP/ASN diversity, reputation, resource cost).
 - **Rendezvous/introduction-point operators** learn which GID is being
   looked up and roughly when, even under `StaticRendezvous`.
 

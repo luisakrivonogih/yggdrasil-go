@@ -141,25 +141,60 @@ circuit's path touches, chosen-hop or not. Multi-hop relaying still
 raises the cost of correlating a circuit's *true* endpoints specifically
 (the adversary has to link multiple such hop-pair observations into one
 circuit, which requires more than any single vantage point gives it) but
-this project does **not** claim to defeat a global adversary, and should
-be read as claiming *less* than before this correction, not the same. No
-padding, cover traffic, or timing obfuscation is active by default in
-this version (`Envelope.PadTo` and `Bundle.AddCoverMessage` are
-implemented, tested primitives — see `docs/garlic-protocol.md` §7 — but
-are not wired into `SendGarlic`'s default send path). Until they are,
-packet size and timing on a given link are exactly what they'd be
-without Garlic, which is meaningful
-metadata to a global adversary.
+this project does **not** claim to defeat a global adversary.
+
+Since this section was first written, `Config.PaddingEnabled` and
+`Config.JitterEnabled` (both default on) are wired into the actual send
+and relay-forward path (`docs/garlic-protocol.md` §9): every packet's
+wire size is independently re-randomized per hop
+(`Envelope.PadToRandomRange`), and every packet's send is independently
+delayed by a random amount before transmission
+(`src/garlic/jitter.go`). `SendGarlicBundled` (§7 of the protocol doc)
+additionally lets a real message travel alongside cover entries an
+observer cannot distinguish from it. These raise the cost of the
+size/timing correlation a global adversary would otherwise get for
+free, but do **not** defeat one: there is no fixed-interval batching
+(a determined adversary can still average over enough samples to erode
+jitter's effect), padding ranges are configurable and therefore
+fingerprintable if left at non-default values, and bundling only
+helps for calls that actually opt into `SendGarlicBundled` with a
+non-zero `coverCount` — `SendGarlic`'s plain path sends one real packet
+with no chaff. A global adversary correlating enough traffic over
+enough time is not something this project claims to defeat, and this
+document should be read accordingly: real cost has been added, not a
+guarantee.
 
 ## Traffic correlation / traffic confirmation
 
-Follows directly from the above: without active padding/cover
-traffic/jitter, an adversary who can watch traffic at both the entry and
-exit of a circuit simultaneously can attempt classic timing/size
-correlation to confirm (not just suspect) that two observed flows are
-the same circuit. This is a standard limitation of onion routing without
-active traffic-shaping, not specific to this implementation, but it's
-real and unmitigated here.
+An adversary who can watch traffic at both the entry and exit of a
+circuit simultaneously can attempt classic timing/size correlation to
+confirm (not just suspect) that two observed flows are the same
+circuit. This project now has three independent mitigations engaged by
+default, each raising the cost of this attack without eliminating it:
+
+- **Per-hop size re-randomization** (`Config.PaddingEnabled`,
+  `docs/garlic-protocol.md` §9): breaks the naive "same size in and out
+  at every hop" correlation signal. Does not hide the *distribution* of
+  sizes a sustained flow produces — an adversary with enough samples on
+  both ends can still attempt statistical (not exact) size correlation.
+- **Per-packet jitter** (`Config.JitterEnabled`, same section): breaks
+  exact send-timestamp correlation across hops. A bounded worker pool
+  and queue mean jitter is skipped (packet sent immediately) once the
+  queue is full under load — an adversary who can induce that load
+  degrades this defense as a side effect.
+- **Cover traffic via bundling** (`SendGarlicBundled`,
+  `docs/garlic-protocol.md` §7): the strongest of the three, but
+  opt-in per call — a caller that never sets `coverCount > 0` gets none
+  of this benefit, and even with cover traffic, an adversary correlating
+  *volume* (not individual packet identity) across many bundles over
+  time is not addressed.
+
+None of this amounts to a mixnet with formal anonymity-set guarantees.
+This is a standard limitation of onion routing without a dedicated
+mixing protocol (fixed-size, fixed-interval batching with a real
+anonymity set), not specific to this implementation, but it remains
+real: a sufficiently patient, sufficiently well-positioned adversary
+retains a statistical correlation attack.
 
 ## Replay
 
@@ -184,39 +219,77 @@ forwarding a marked one.
 
 ## Route manipulation (attacker tries to influence path selection)
 
-Circuit paths in this version are chosen entirely by the **originator**,
-from hops it has already directly queried via `QueryCapability` — there
-is no path-selection input an intermediate or remote party can inject.
-The weakness here is upstream of route manipulation: nothing in this
-version implements diverse/weighted random path selection at all (no
-"pick N hops from a pool with diversity constraints" logic exists yet);
-`CreateCircuit` takes an explicit, caller-supplied hop list. Whoever
-calls `CreateCircuit` (a human, or future selection logic) is entirely
-responsible for path quality and diversity today.
+Circuit paths are chosen entirely by the **originator** — there is no
+path-selection input an intermediate or remote party can inject.
+`CreateCircuit` still takes an explicit, caller-supplied hop list, so
+whoever builds that list is responsible for its quality; but a caller
+now has a real option instead of picking hops by hand:
+`Garlic.SelectPath(n)` (`docs/garlic-protocol.md` §10) builds that list
+from topologically diverse candidates automatically. This does not
+close route manipulation as a category (an adversary still cannot
+inject path-selection input either way, so there's nothing new to
+manipulate), but it does mean "diverse selection" is no longer purely
+aspirational — it exists and a caller must actively choose not to use
+it.
 
 ## Sybil nodes
 
 An adversary running many Garlic-capable nodes can bias a naive
-path-selection strategy toward paths it controls end-to-end, because
-`QueryCapability`/hop selection has no reputation, diversity, or
-resource-cost mechanism to make running many identities expensive.
-**Not mitigated** in this version — flagged explicitly as unsolved,
-consistent with the instruction not to claim protection this codebase
-doesn't provide. A future path-selection implementation should treat
-Sybil resistance as a first-class requirement (e.g. weighting by
-independent network/AS diversity, not just by capability response), not
-retrofit it.
+path-selection strategy toward paths it controls end-to-end. Two real,
+partial mitigations now exist, alongside real remaining gaps:
+
+- **`SelectDiversePath`** (`docs/garlic-protocol.md` §10,
+  `src/garlic/selection.go`) prefers topologically distant candidates
+  (mesh hop count via `core.Core.GetPaths()`) and rejects picking two
+  candidates that share an immediate spanning-tree parent
+  (`core.Core.GetTree()`). This raises the cost of the *simplest* Sybil
+  strategy — deploying several identities on the same link or local
+  segment and hoping a naive selector picks more than one of them.
+- **Multipath pools** (`docs/garlic-protocol.md` §10,
+  `src/garlic/multipath.go`) mean an adversary controlling one path in a
+  pool sees only the fraction of traffic routed over that path, not the
+  whole conversation — it must control *every* path in the pool to
+  reconstruct the full picture, which is strictly more expensive than
+  controlling a single circuit.
+
+**What remains genuinely unmitigated:** neither mechanism has any
+concept of IP/ASN diversity or real-world operator identity — an
+adversary who deploys nodes with genuinely diverse tree positions (not
+sharing a tree parent, not close in hop count) defeats `SelectDiversePath`
+entirely, since tree position is the only signal available, and
+propagating a hop's real IP through gossip would itself be a privacy
+cost for relay operators (a deliberate design choice, not an oversight
+— see `docs/garlic-protocol.md` §8). There is no reputation system, no
+proof-of-work or other resource cost to registering as a Garlic node,
+and no mechanism that makes running many identities expensive. Treat
+Sybil resistance here as "raises the bar above picking uniformly at
+random or whatever answered first," not as solved.
 
 ## Intersection attacks
 
-Not addressed by anything in this version. An adversary who can observe
-a target's activity over multiple sessions/circuits and correlate what's
-common across them (classic intersection-attack methodology) is not
-defended against by per-circuit relaying alone. This would require
-active cover traffic and/or careful circuit-rotation policy that doesn't
-exist yet (`Config.CircuitLifetime` bounds how long a single circuit
-lives, which limits — but does not eliminate — how much traffic
-correlates to one circuit's identity).
+An adversary who observes a target's activity over multiple
+sessions/circuits and correlates what's common across them (classic
+intersection-attack methodology) is not defended against by anything
+that identifies "this traffic came from a client, not a relay" — which
+is the structural property intersection attacks exploit. This project's
+mitigation is architectural, not a dedicated intersection-attack
+defense: every Garlic-capable node is, by construction, both a
+potential circuit originator *and* a relay for other nodes' circuits
+(there is no separate "client-only" mode) — so an adversary observing
+"key X sent/received Garlic-tagged traffic at time T" cannot conclude
+from that alone whether X was the real source/destination or simply
+relaying for someone else. This narrows what an intersection attack can
+conclude from participation alone, but does **not** defeat one: an
+adversary who can also correlate size/timing/volume across sessions
+(the "Traffic correlation" section above) can still narrow down which
+of a node's flows are its own versus relayed, especially against a
+target with low relayed-traffic volume where "this node is relaying
+right now" is itself a distinguishing signal. `Config.CircuitLifetime`
+bounds how long a single circuit lives, which limits — but does not
+eliminate — how much traffic correlates to one circuit's identity
+across sessions. Deliberate circuit-rotation *policy* (when to build a
+new circuit, how much to relay for others as camouflage) is left to the
+caller; nothing in this version enforces one.
 
 ## Summary table
 
@@ -224,13 +297,13 @@ correlates to one circuit's identity).
 |---|---|
 | Passive observer | Sees traffic exists, sizes, timing; not payload. Cannot see the Garlic tag itself (inside the encrypted session) |
 | Single malicious relay (chosen Garlic hop) | Sees its own hop's real-key neighbors (unavoidable, via ironwood's own unencrypted `source`/`dest` fields, not something Garlic hides); cannot decrypt other layers; ephemeral-key reuse is a linkability signal if colluding with another hop |
-| Mesh-path intermediate node (not a chosen hop) | Same real-key-pair visibility as a malicious relay, for any hop-pair its position sits between - without ever being selected as a circuit hop. New finding, see dedicated section above |
+| Mesh-path intermediate node (not a chosen hop) | Same real-key-pair visibility as a malicious relay, for any hop-pair its position sits between - without ever being selected as a circuit hop |
 | Malicious introduction point | Sees GID lookups; payload only if also the terminal hop |
 | Malicious endpoint | Sees delivered payload (expected) and its own previous hop |
-| Global passive adversary | Real capability, stronger than a naive reading of "payload is encrypted" suggests - routing metadata (who talks to whom) is not encrypted at the ironwood network layer at all |
-| Traffic correlation | Real capability - no padding/cover traffic active by default |
+| Global passive adversary | Real capability - routing metadata (who talks to whom) is not encrypted at the ironwood network layer at all; per-hop padding/jitter/bundling (default on) raise the cost of correlation but do not defeat a patient, well-positioned adversary |
+| Traffic correlation | Raised cost via default-on per-hop size randomization and send jitter, plus opt-in cover traffic (`SendGarlicBundled`) - not a mixnet, statistical correlation over enough samples remains possible |
 | Replay | Mitigated within the bounded replay window |
 | Packet tagging | Mitigated by AEAD authentication |
-| Route manipulation | N/A - no automated path selection exists yet to manipulate |
-| Sybil | Not mitigated - no diversity/reputation mechanism |
-| Intersection attacks | Not mitigated |
+| Route manipulation | N/A - no path-selection input an intermediate/remote party can inject either way; `SelectPath` is available but not mandatory |
+| Sybil | Partially mitigated - `SelectDiversePath` (tree-position diversity) and multipath pools raise the cost of the simplest strategies; no IP/ASN diversity, reputation, or resource-cost mechanism exists |
+| Intersection attacks | Narrowed, not defeated - every node is structurally both a possible originator and a relay for others, so participation alone doesn't distinguish "this is my traffic" from "I'm relaying"; still erodable via traffic-correlation across sessions |

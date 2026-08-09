@@ -125,8 +125,56 @@ python3 -c "print(bytes.fromhex('68656c6c6f20626f622c2066726f6d20616c6963652c207
 
 Full handler list (`src/garlic/admin.go`): `getGarlicIdentity`,
 `garlicQueryCapability`, `createGarlicCircuit`, `closeGarlicCircuit`,
-`sendGarlic`, `recvGarlic`, `publishGarlicService`, `lookupGarlicService`,
-`getGarlicStats`.
+`sendGarlic`, `sendGarlicBundled`, `recvGarlic`, `publishGarlicService`,
+`lookupGarlicService`, `getGarlicStats`, `getGarlicKnownPeers`,
+`garlicGossip`, `createGarlicCircuitPool`, `closeGarlicCircuitPool`,
+`sendGarlicMultipath`.
+
+## 5. Exercise the newer defenses (discovery, diverse selection, multipath, bundling)
+
+Padding (`Config.PaddingEnabled`) and jitter (`Config.JitterEnabled`)
+apply automatically to every `sendGarlic` call above — nothing extra to
+do to exercise them, they're default on and invisible at the CLI level
+(they change wire size/timing, not the API). The rest need deliberate
+calls:
+
+```sh
+# nodeB learns about any Garlic peers nodeA already knows (itself,
+# after the garlicQueryCapability round trip above, plus anything nodeA
+# has gossiped from others). Requires nodeA to already be
+# capability-verified as seen from nodeB - i.e. run
+# garlicQueryCapability from nodeB toward nodeA first if you haven't.
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json garlicQueryCapability key=$NODEB_KEY
+NODEA_KEY=$(./yggdrasilctl -endpoint=tcp://localhost:9001 -json getself | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json garlicGossip key=$NODEA_KEY
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json getGarlicKnownPeers
+
+# Build two independent 1-hop circuits through nodeB as a pool, then
+# send a few payloads - each call round-robins to the next circuit in
+# the pool, so consecutive sends don't all reuse the same circuit.
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json createGarlicCircuitPool paths="$NODEB_KEY;$NODEB_KEY"
+# => {"poolId": "..."}
+POOL_ID=...
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json sendGarlicMultipath poolId=$POOL_ID payload=$PAYLOAD_HEX
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json recvGarlic timeoutSeconds=5
+./yggdrasilctl -endpoint=tcp://localhost:9001 closeGarlicCircuitPool poolId=$POOL_ID
+
+# Send the real payload alongside 5 cover entries in one bundle - an
+# observer who can't decrypt any entry can't tell which one, if any,
+# is real. Behaves identically to sendGarlic from the receiving side.
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json createGarlicCircuit hops=$NODEB_KEY
+CIRCUIT_ID2=...
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json sendGarlicBundled circuitId=$CIRCUIT_ID2 payload=$PAYLOAD_HEX coverCount=5
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json recvGarlic timeoutSeconds=5
+```
+
+`SelectPath`/`SelectDiversePath` (topologically diverse hop selection)
+and `HopCount`/`PingCapability` (mesh distance and RTT) are not exposed
+as admin handlers — they're Go APIs (`src/garlic/manager.go`,
+`src/garlic/selection.go`) intended for a caller building automated hop
+selection, not manual CLI use. `TestIntegrationSelectPathAgainstRealTopology`
+(`src/garlic/integration_test.go`) exercises `SelectPath` against a real
+running mesh if you want to see it in action without writing new code.
 
 ## On a real multi-node network
 

@@ -26,6 +26,8 @@ The first byte of that payload is the **Garlic message type**
 | `0x01` | `msgTypeCapabilityRequest` | "Do you support Garlic, and what's your public key?" No body. |
 | `0x02` | `msgTypeCapabilityResponse` | Answer to the above; body is a `CapabilityMessage` (§3). |
 | `0x03` | `msgTypeCircuitData` | One onion-routed packet; body is described in §4. |
+| `0x04` | `msgTypeAnnounce` | Gossip of known Garlic-capable peers; body is an `AnnounceMessage` (§8). |
+| `0x05` | `msgTypeCircuitDataBundle` | Several `msgTypeCircuitData`-shaped entries (real traffic mixed with cover entries) carried together; body is a `Bundle` (§7). |
 
 Any other value, or an empty payload, is silently dropped by
 `Garlic.handleIncoming` — no error, no response, matching the "generic
@@ -34,8 +36,12 @@ protocol errors" requirement (§17 of the original brief).
 ## 2. Garlic Envelope
 
 `src/garlic/envelope.go`. The structure every `msgTypeCircuitData`
-message's onion-layer ciphertext is wrapped in on the wire, and the unit
-`Envelope.PadTo` normalizes to a fixed size.
+message's onion-layer ciphertext is wrapped in on the wire.
+`Envelope.PadTo` normalizes to a fixed size; `Envelope.PadToRandomRange`
+picks a fresh random target size in `[min, max]` on every call instead —
+this is what `Config.PaddingEnabled` actually drives on the send/relay
+path (§9), so consecutive envelopes on the same link don't share a
+size an observer could use as a fingerprint.
 
 ```
 offset  size  field
@@ -152,7 +158,12 @@ split from the I/O wrapper):
 6. If the recovered `NextHop` is empty: deliver `Inner` locally
    (`Garlic.RecvGarlic`).
 7. Otherwise: rebuild an `Envelope` with the same `CircuitID`,
-   `PacketCounter`, and `Expiration`, `Body = Inner`, and forward
+   `PacketCounter`, and `Expiration`, `Body = Inner`. If
+   `Config.PaddingEnabled`, this hop independently re-rolls
+   `Envelope.PadToRandomRange(MinPaddedSize, MaxPaddedSize)` before
+   marshaling — the outgoing wire size on this hop's outbound link is
+   unrelated to the size this hop received on its inbound link, by
+   design (§9). Forward
    `msgTypeCircuitData || ephemeral_public_key || new_envelope` to
    `NextHop` unchanged. The ephemeral public key is passed through
    byte-for-byte so every subsequent hop can perform the same §4.1
@@ -189,10 +200,7 @@ Yggdrasil IPv6 address.
 
 ## 7. Bundling
 
-`src/garlic/bundle.go`. Not currently wired into the send/receive path
-described in §4 — it exists as a standalone, tested primitive for future
-use (multiple independent messages per garlic packet, §3.7 of the
-architecture doc). Wire format:
+`src/garlic/bundle.go`. Wire format:
 
 ```
 offset  size   field
@@ -200,7 +208,113 @@ offset  size   field
 4       ...    per message: len(4) + bytes   (max 65535 bytes each)
 ```
 
-## 8. What this version does not define
+Wired into the send path via `Garlic.SendGarlicBundled(id, payload,
+coverCount)`: it builds the one real `circuitData` entry (§4, same
+shape as a standalone message's body — `ephemeral_public_key ||
+Envelope`), appends `coverCount` cover entries via
+`Bundle.AddCoverMessage` (random bytes, sized to match the real entry),
+shuffles the entry order (Fisher-Yates, `shuffleBundleMessages`), and
+sends the result as one `msgTypeCircuitDataBundle` message.
+
+On receipt, `Garlic.processCircuitDataBundle` unmarshals the bundle and
+runs **every** entry through the exact same `processCircuitData`
+pipeline used for a standalone message (§4.3) — no separate code path,
+no weaker checks. A cover entry has no valid ephemeral key/ciphertext
+relationship, so it fails `DecryptLayer` and is dropped exactly like a
+corrupted or misdirected message already is; the real entry (if this
+node is a hop for it) is delivered or forwarded normally. Each
+non-drop outcome is acted on independently, so a bundle's entries need
+not belong to the same circuit or even be addressed through the same
+next hop.
+
+This is the actual "garlic" property (as opposed to a single onion
+stream): an observer — including a hop that isn't the intended
+recipient of any entry in the bundle — cannot decrypt any entry, and
+therefore cannot tell which one, if any, is real, or even how many of
+the bundle's entries are real versus chaff. See
+`docs/garlic-threat-model.md`'s traffic-correlation section for what
+this does and does not defend against.
+
+## 8. Discovery / gossip (`msgTypeAnnounce`)
+
+`src/garlic/discovery.go`. Lets a node learn about Garlic-capable peers
+it has never directly queried itself, entirely over the
+`typeSessionGarlic` channel — a node that doesn't run `src/garlic`
+cannot construct, parse, or respond to this message type, so discovery
+is only ever visible to other Garlic nodes, by construction (the same
+property capability negotiation already has).
+
+Body of a `msgTypeAnnounce` message (`AnnounceMessage`):
+
+```
+offset  size  field
+0       4     peer_count            (max 32)
+4       ...   per peer:
+              1     node_key_len    (max 64)
+              ...   node_key
+              1     garlic_key_len  (max 64)
+              ...   garlic_key
+```
+
+`Garlic.processAnnounce` records every entry with both keys non-empty
+into the local `discoveryRegistry` (bounded, evicts the
+least-recently-seen entry once full) — it does **not** treat this as
+trust: a gossiped entry is only ever used as a circuit hop after its
+own `QueryCapability` round trip succeeds, same as a directly-learned
+peer. `Garlic.GossipAnnounce` sends a sample of the local registry
+(`Config.GossipSampleSize`) to one peer; a background tick
+(`Config.GossipInterval`) calls it for up to `Config.GossipFanout`
+peers this node has itself already capability-verified
+(`capabilityCache`), never an unverified discovery candidate — so
+gossip only propagates outward from nodes this instance has confirmed
+are running Garlic.
+
+## 9. Timing and size defenses
+
+Two independent, per-packet randomizations apply to every
+`msgTypeCircuitData` send or forward when enabled (both default on,
+`Config.PaddingEnabled`/`Config.JitterEnabled`):
+
+- **Size** (§2): `Envelope.PadToRandomRange(MinPaddedSize,
+  MaxPaddedSize)`, re-rolled independently by the originator and by
+  every relay forwarding the packet — so a packet's size on one
+  hop-to-hop link carries no information about its size on the next.
+- **Timing**: `Garlic.sendCircuitData` hands every outgoing packet to a
+  bounded worker-pool scheduler (`src/garlic/jitter.go`) with a delay
+  drawn uniformly from `[MinJitter, MaxJitter]`, independently rolled
+  per packet, before it's actually transmitted. The scheduler never
+  blocks the caller (a full queue falls back to sending immediately)
+  — required because relay forwarding happens synchronously inside
+  `core.Core.ReadFrom`'s read loop.
+
+Neither is a general-purpose mixnet: there is no fixed-interval
+batching, and a global adversary watching both ends of a circuit
+simultaneously can still attempt statistical correlation over enough
+samples. See `docs/garlic-threat-model.md`'s "Traffic correlation"
+section for what this does and does not raise the cost of.
+
+## 10. Path selection and multipath
+
+Node-local behavior, not a wire message, but it materially changes
+what's observable on the wire:
+
+- `Garlic.SelectPath(n)` (`src/garlic/selection.go`) picks `n`
+  circuit-hop candidates from this node's discovered/verified Garlic
+  peers, preferring topologically distant candidates
+  (`core.Core.GetPaths()`'s hop count) and avoiding two candidates that
+  share an immediate tree parent (`core.Core.GetTree()`) — a cheap
+  signal they might be run by the same operator or sit on the same
+  local segment. This is a heuristic, not Sybil resistance (see
+  `docs/garlic-threat-model.md`'s Sybil section for what it does not
+  solve).
+- `Garlic.CreateCircuitPool`/`SendGarlicMultipath`
+  (`src/garlic/multipath.go`) build several independent circuits and
+  round-robin sends across them, so a given circuit's link carries only
+  a fraction of one conversation's total traffic — an adversary
+  positioned on (or colluding across) only some of the pool's paths
+  sees only that fraction.
+
+## 11. What this version does not define
 
 - No wire format for circuit teardown/error signaling — a dead or
   uncooperative hop is currently only detected by the originator's own
