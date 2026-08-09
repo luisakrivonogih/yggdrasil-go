@@ -79,6 +79,12 @@ type Config struct {
 	GossipInterval     time.Duration
 	GossipFanout       int
 	GossipSampleSize   int
+
+	// MinHopCount is SelectPath's minimum mesh distance (see
+	// SelectDiversePath) - a Sybil-resistance measure: a candidate too
+	// close to this node (e.g. a direct peer) is more likely to be run
+	// by the same operator or network than one several hops away.
+	MinHopCount int
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -108,6 +114,7 @@ func DefaultConfig() Config {
 		GossipInterval:       30 * time.Second,
 		GossipFanout:         2,
 		GossipSampleSize:     16,
+		MinHopCount:          2,
 	}
 }
 
@@ -283,6 +290,43 @@ func (g *Garlic) GossipAnnounce(to ed25519.PublicKey) error {
 // QueryCapability has also been called for that specific key.
 func (g *Garlic) KnownPeers() []DiscoveredPeer {
 	return g.discovery.list()
+}
+
+// candidatePool builds a HopCandidate for every known/discovered peer
+// this node has a resolved mesh path to, annotated with hop count and
+// tree parent (see SelectDiversePath). A peer with no resolved path yet
+// is skipped rather than scored with a meaningless zero.
+func (g *Garlic) candidatePool() []HopCandidate {
+	tree := g.core.GetTree()
+	parentOf := make(map[string][]byte, len(tree))
+	for _, t := range tree {
+		parentOf[string(t.Key)] = t.Parent
+	}
+
+	known := g.discovery.list()
+	pool := make([]HopCandidate, 0, len(known))
+	for _, p := range known {
+		hops, ok := g.HopCount(p.NodeKey)
+		if !ok {
+			continue
+		}
+		pool = append(pool, HopCandidate{
+			NodeKey:         p.NodeKey,
+			GarlicPublicKey: p.GarlicPublicKey,
+			HopCount:        hops,
+			TreeParent:      parentOf[string(p.NodeKey)],
+		})
+	}
+	return pool
+}
+
+// SelectPath chooses n topologically diverse circuit hops from this
+// node's known/discovered Garlic peers (see SelectDiversePath and
+// Config.MinHopCount). The result still needs each hop's capability
+// re-verified (e.g. via QueryCapability) before CreateCircuit, in case a
+// discovered/gossiped entry has gone stale.
+func (g *Garlic) SelectPath(n int) ([]HopCandidate, error) {
+	return SelectDiversePath(g.candidatePool(), n, g.cfg.MinHopCount)
 }
 
 // Identity returns this node's long-term Garlic identity.

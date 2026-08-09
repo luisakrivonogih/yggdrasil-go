@@ -272,3 +272,70 @@ func TestIntegrationGossipDiscoversUnknownPeer(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestIntegrationSelectPathAgainstRealTopology proves SelectPath's
+// core.Core.GetTree()/GetPaths() integration works against a real mesh,
+// not just SelectDiversePath's already-unit-tested selection algorithm
+// in isolation.
+func TestIntegrationSelectPathAgainstRealTopology(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	nodeC := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB, nodeC}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all) // A -- B -- C
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	idC, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (C) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0 // this test's tiny topology has no room for a real distance filter
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gC := garlic.New(nodeC, idC, cfg, garlic.NewStaticRendezvous())
+	defer gC.Close()
+
+	// A needs a resolved mesh path to a candidate (not just knowledge of
+	// its key) before SelectPath can score it - direct contact resolves
+	// one as a side effect, same as real usage would after discovering
+	// candidates via gossip.
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+	waitForCapability(t, gA, nodeC.PublicKey(), 60*time.Second)
+
+	selected, err := gA.SelectPath(2)
+	if err != nil {
+		t.Fatalf("SelectPath returned error: %v", err)
+	}
+	if len(selected) != 2 {
+		t.Fatalf("SelectPath returned %d hops, want 2", len(selected))
+	}
+	for _, hop := range selected {
+		if !bytes.Equal(hop.NodeKey, nodeB.PublicKey()) && !bytes.Equal(hop.NodeKey, nodeC.PublicKey()) {
+			t.Errorf("selected hop %x is neither B nor C", hop.NodeKey)
+		}
+		if hop.HopCount <= 0 {
+			t.Errorf("selected hop %x has HopCount = %d, want > 0 (a resolved real mesh path)", hop.NodeKey, hop.HopCount)
+		}
+	}
+	if bytes.Equal(selected[0].NodeKey, selected[1].NodeKey) {
+		t.Fatal("SelectPath returned the same node twice")
+	}
+}

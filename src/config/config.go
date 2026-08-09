@@ -72,6 +72,7 @@ type GarlicConfig struct {
 	Padding            GarlicPaddingConfig `comment:"Per-hop packet size randomization: the originator and every relay\nindependently pick a new random wire size within [MinSize, MaxSize]\nfor each packet, so a hop-to-hop link's packet sizes don't match\nthose on the next link - see docs/garlic-threat-model.md's\ndiscussion of traffic correlation."`
 	Jitter             GarlicJitterConfig  `comment:"Random delay before actually transmitting a circuit packet (origin\nsend or relay forward), independently re-rolled per packet - the\ntiming half of the same traffic-correlation defense as Padding."`
 	MaxDiscoveredPeers int                 `comment:"Maximum number of other Garlic nodes this node will remember, learned\neither directly (a successful capability query) or via gossip from\nanother already-verified Garlic peer. Never exposed to, or\ndiscoverable by, a non-Garlic node."`
+	MinHopCount        int                 `comment:"Minimum mesh hop distance for a candidate to be selected as a circuit\nhop by SelectPath - a node too close is more likely to be run by the\nsame operator or network as this one. Does not affect hops supplied\ndirectly to CreateCircuit."`
 }
 
 type GarlicPaddingConfig struct {
@@ -131,6 +132,7 @@ func GenerateConfig() *NodeConfig {
 			MaxDelay: "75ms",
 		},
 		MaxDiscoveredPeers: 1024,
+		MinHopCount:        2,
 	}
 	if err := cfg.postprocessConfig(); err != nil {
 		panic(err)
