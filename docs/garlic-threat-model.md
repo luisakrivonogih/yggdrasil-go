@@ -62,17 +62,61 @@ next one, or the payload of any other layer (proven directly by
 `TestBuildOnionHopCannotDecryptAnotherHopsLayer`). Cannot distinguish "I
 am hop 2 of 5" from "I am hop 2 of 2" from the message alone.
 
-**Known weakness — ephemeral key reuse across hops.** Per
-`docs/garlic-protocol.md` §4.1, a circuit's originator uses **one**
-ephemeral public key for every hop's ECDH, carried unchanged in every
-forwarded message. Two colluding relays on the same circuit (see "Sybil"
-below) can trivially confirm they're on the same circuit by comparing
-that ephemeral public key byte-for-byte — a real linkability signal a
-design with per-hop-blinded key material (as Tor/Sphinx use) would not
-have. This is a deliberate simplification (documented in
-`docs/garlic-architecture.md`'s roadmap as trading a telescoping
-handshake for a much simpler non-interactive construction) and a
-concrete item for a future hardening pass, not a hidden defect.
+**Fixed — per-hop ephemeral keys.** Per `docs/garlic-protocol.md` §4.1,
+a circuit's originator now generates an independent ephemeral X25519
+keypair for *every* hop. A hop only learns the next hop's ephemeral
+public key by successfully decrypting its own layer - it is never
+carried as a value shared unchanged across the whole circuit. Two
+non-adjacent colluding relays (e.g. hop 1 and hop 3 of a 3-hop circuit)
+therefore have no ephemeral public key in common to compare
+(`TestNonAdjacentHopsCannotLinkViaEphemeralKeys`). Adjacent hops (hop 1
+and hop 2) unavoidably share knowledge of the ephemeral key *between*
+them - hop 1 must relay hop 2's ephemeral public key onward as part of
+ordinary forwarding - but hop 1 never learns hop 2's corresponding
+private key, and so cannot derive hop 2's session key
+(`TestRelay1CannotDeriveRelay2SessionKey`). This is the same property a
+Tor-style (non-Sphinx) telescoping circuit gives; it is not full Sphinx-
+style blinding, which would also hide the next hop's ephemeral public
+key from its immediate predecessor - see the crypto hardening design
+spec for why that additional step wasn't judged necessary here.
+
+**This closes ephemeral-key linkability specifically — it does not make
+circuits unlinkable in general.** The `Envelope`'s `CircuitID` (16
+bytes), `PacketCounter`, and `Expiration` fields sit outside the per-hop
+AEAD-encrypted layer entirely (they are not part of `Body`, the only
+field the layer AEAD covers) and are copied verbatim, unchanged, by
+every relay that forwards the circuit (`docs/garlic-protocol.md` §4.3:
+a forwarding hop rebuilds the outgoing `Envelope` with "the same
+`CircuitID`, `PacketCounter`, and `Expiration`"). Two colluding
+non-adjacent relays can therefore still trivially confirm they're on the
+same circuit by comparing these three fields byte-for-byte, even though
+they now share no ephemeral key. Nothing in this hardening pass rewrites
+`CircuitID` (or the other two fields) per hop the way, e.g., Tor rewrites
+circuit IDs at each relay; closing this is a concrete item for a future
+pass, not something the ephemeral-key fix above addresses.
+
+## Malicious relay / availability attacker
+
+Separate from the confidentiality/linkability question above: any relay
+on a circuit path can, at will:
+
+- drop packets it's asked to forward,
+- delay packets by an arbitrary amount before forwarding,
+- reorder packets relative to how it received them,
+- selectively drop or delay only packets on one particular circuit while
+  forwarding others normally,
+- stop forwarding for a circuit entirely, at any point, with no
+  notification to anyone.
+
+Garlic has no mechanism to distinguish a relay doing any of the above
+deliberately from an ordinary network failure (a dropped UDP datagram, a
+congested link, a peer that legitimately went offline) - both present
+identically to the originator and to every other hop. This is not a gap
+specific to this implementation; no purely reactive circuit protocol
+without an independent liveness/acknowledgment channel can make this
+distinction, and Garlic does not have one. A circuit that stops
+producing traffic is evidence of *something* having gone wrong, not
+evidence of which of these causes it was.
 
 ## Mesh-path intermediate node (not a chosen circuit hop, sits on the route between two of them)
 
@@ -127,6 +171,85 @@ identity, unless the circuit has fewer than 2 hops (a 1-hop "circuit" —
 supported, see `TestBuildOnionSingleHop` — gives the sole hop full
 visibility into both ends; this is expected of a 1-hop path and is why
 `Config.PathLength` defaults to 3, not 1).
+
+## Malicious client
+
+A remote peer sending this node arbitrary Garlic protocol messages,
+without being a chosen circuit hop for anything this node originated.
+What's mitigated today, and what remains future work:
+
+**Mitigated today:**
+
+- **Circuit creation flood / circuit state exhaustion** —
+  `CircuitManager` enforces `MaxCircuits` (global) and
+  `MaxCircuitsPerPeer` (per first-hop peer); `relayCircuitState`
+  enforces a capacity bound on how many circuits this node will track
+  replay state for as a relay, refusing new circuit IDs once full
+  (`TestCircuitManagerEnforcesMaxCircuits`, `TestRelayCircuitStateBoundedCapacity`).
+- **Per-source message flooding** — `handleIncoming` gates *every*
+  incoming Garlic message (capability requests/responses, circuit data,
+  announces, bundles) behind a per-peer token-bucket `RateLimiter`,
+  keyed by the sending node's Ed25519 key, before any type-specific
+  processing runs (`src/garlic/ratelimit.go`; defaults
+  `RatePerSecond`=50, `RateBurst`=200, `MaxTrackedPeers`=4096). Once
+  `MaxTrackedPeers` distinct peers are being tracked, a request from a
+  new peer is denied outright (fails closed) rather than growing the
+  bucket table without bound. This applies uniformly to whatever message
+  type a peer sends, including the circuit-open/circuit-teardown cycling
+  the ceiling-based mitigation above is meant to bound.
+- **Malformed packets / oversized declared lengths** — every parser in
+  `src/garlic` (`Envelope`, `LayerPlaintext`, `CapabilityMessage`,
+  `Bundle`, `AnnounceMessage`, `ServiceDescriptor`'s field encoding)
+  validates a declared length against both a fixed maximum and the
+  bytes actually present *before* using it to size an allocation or
+  slice operation. For `Envelope`, `LayerPlaintext`, `CapabilityMessage`,
+  `Bundle`, and `ServiceDescriptor`'s field encoding this is proven
+  continuously by the `Fuzz*` targets in `fuzz_test.go`, whose only
+  invariant is "never panics, never allocates unboundedly";
+  `AnnounceMessage` (`discovery.go`) does the same declared-count/
+  declared-length validation by inspection but does not yet have a
+  dedicated fuzz harness.
+- **Excessive nesting** — `MaxPathLength` (8) bounds circuit depth;
+  onion construction cost is therefore bounded independent of anything a
+  remote peer controls.
+- **Huge bundles** — `Bundle`'s `message_count` and per-message length
+  are both bounded (`MaxBundleMessages`, `MaxBundleMessageSize`).
+- **Huge GID counts / excessive service publishing** — `MaxIntroPoints`
+  bounds a single descriptor's introduction-point list;
+  `StaticRendezvous` stores one descriptor per GID (a later `Publish`
+  replaces, not accumulates).
+- **Replay-cache exhaustion** — `ReplayWindow` is a fixed 2048-bit
+  bitmap regardless of how far or erratically an attacker drives the
+  counter (`TestReplayWindowMemoryStaysBounded`); the relay-side table
+  of these windows is itself capacity-bounded (above).
+- **CPU exhaustion during X25519/AEAD** — bounded indirectly by the
+  circuit/path-length caps above: the amount of ECDH/AEAD work a single
+  message can force is a function of `MaxPathLength`, not attacker-
+  controlled input size.
+
+**Future work, not currently implemented:**
+
+- The per-peer `RateLimiter` above shares one budget across every
+  message type from a given peer - it has no separate, tighter
+  sub-budget for circuit-creation traffic specifically. A peer can still
+  spend its entire rate allowance on opening and tearing down circuits
+  repeatedly, up to the shared rate/burst limit, rather than being
+  throttled harder for that pattern than for, say, capability requests.
+- No proof-of-work or other admission cost on acquiring a new peer
+  identity: rate limiting and the `MaxCircuits`/`MaxCircuitsPerPeer`/
+  `MaxTrackedPeers` ceilings all key off of a peer's Ed25519 node key, so
+  none of them raise the cost of the underlying resource (a fresh
+  keypair) an unvetted-but-Garlic-capable attacker would cycle through to
+  get a fresh budget.
+- Service descriptor publishing (`PublishService`) has no rate limit of
+  its own beyond whatever the `Rendezvous` implementation in use chooses
+  to enforce - `StaticRendezvous` enforces none. Today this is reachable
+  only via this node's own local admin socket, not by a remote peer
+  (`docs/garlic-rendezvous.md`: no wire message type exists for a remote
+  `Publish`/`Lookup`), so it's not yet a live remote "malicious client"
+  surface - but it would become one the moment any future `Rendezvous`
+  implementation makes `Publish`/`Lookup` reachable over the network, as
+  `docs/garlic-rendezvous.md`'s "Future direction" section discusses.
 
 ## Global passive adversary (observes a large fraction of the network)
 
@@ -195,6 +318,25 @@ mixing protocol (fixed-size, fixed-interval batching with a real
 anonymity set), not specific to this implementation, but it remains
 real: a sufficiently patient, sufficiently well-positioned adversary
 retains a statistical correlation attack.
+
+## Active timing/watermark attacker
+
+Distinct from the passive correlation adversary above: a relay (or any
+on-path node) that *actively* manipulates the timing of packets it
+forwards, rather than merely observing them, to inject or detect a
+timing pattern ("watermark") that survives the hops in between.
+
+`Config.JitterEnabled`'s random pre-send delay defends against a
+*passive* observer trying to correlate exact send timestamps across two
+points it watches. It does **not** defend against an adversary that can
+selectively delay chosen packets - such an adversary can, in principle,
+impose its own timing pattern on a flow regardless of what jitter any
+single hop adds on top, since the watermark is injected by the attacker
+controlling one hop's forwarding delay, not inferred from otherwise-
+unperturbed timing. Nothing in this implementation detects or defends
+against this specifically. Do not read the jitter defense described
+above as covering this case - it does not, and no claim to the contrary
+appears anywhere else in this document or in `docs/garlic-protocol.md`.
 
 ## Replay
 
@@ -296,12 +438,15 @@ caller; nothing in this version enforces one.
 | Adversary | Real capability retained |
 |---|---|
 | Passive observer | Sees traffic exists, sizes, timing; not payload. Cannot see the Garlic tag itself (inside the encrypted session) |
-| Single malicious relay (chosen Garlic hop) | Sees its own hop's real-key neighbors (unavoidable, via ironwood's own unencrypted `source`/`dest` fields, not something Garlic hides); cannot decrypt other layers; ephemeral-key reuse is a linkability signal if colluding with another hop |
+| Single malicious relay (chosen Garlic hop) | Sees its own hop's real-key neighbors (unavoidable, via ironwood's own unencrypted `source`/`dest` fields, not something Garlic hides); cannot decrypt other layers; per-hop ephemeral keys now mean non-adjacent colluding hops share no ephemeral key to compare - but `CircuitID`/`PacketCounter`/`Expiration` are still copied verbatim, unencrypted, hop-to-hop, and remain a linkability signal for colluding non-adjacent hops |
+| Malicious relay / availability attacker | Any hop can drop, delay, or reorder a circuit's traffic at will, or stop forwarding for it entirely - indistinguishable from an ordinary network failure, since Garlic has no independent liveness/acknowledgment channel |
 | Mesh-path intermediate node (not a chosen hop) | Same real-key-pair visibility as a malicious relay, for any hop-pair its position sits between - without ever being selected as a circuit hop |
 | Malicious introduction point | Sees GID lookups; payload only if also the terminal hop |
 | Malicious endpoint | Sees delivered payload (expected) and its own previous hop |
+| Malicious client (uninvolved remote peer) | Circuit-flood, oversized-length, deep-nesting, huge-bundle, and replay-cache-exhaustion vectors are bounded by fixed caps and a per-peer rate limiter, both fuzz/unit-test proven; no admission cost exists for acquiring a fresh peer identity, and the rate limiter shares one budget across all message types rather than specifically throttling circuit-creation churn |
 | Global passive adversary | Real capability - routing metadata (who talks to whom) is not encrypted at the ironwood network layer at all; per-hop padding/jitter/bundling (default on) raise the cost of correlation but do not defeat a patient, well-positioned adversary |
 | Traffic correlation | Raised cost via default-on per-hop size randomization and send jitter, plus opt-in cover traffic (`SendGarlicBundled`) - not a mixnet, statistical correlation over enough samples remains possible |
+| Active timing/watermark attacker | Not defended against - jitter only protects against a passive observer; an adversary that actively delays chosen packets to imprint a detectable pattern is unaffected by anything in this implementation |
 | Replay | Mitigated within the bounded replay window |
 | Packet tagging | Mitigated by AEAD authentication |
 | Route manipulation | N/A - no path-selection input an intermediate/remote party can inject either way; `SelectPath` is available but not mandatory |
