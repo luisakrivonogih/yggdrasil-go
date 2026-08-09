@@ -59,12 +59,12 @@ func buildTestPath(hopIdentities []*Identity) ([]CapabilityMessage, [][]byte) {
 	path := make([]CapabilityMessage, len(hopIdentities))
 	nodeKeys := make([][]byte, len(hopIdentities))
 	for i, id := range hopIdentities {
-		// Uses CapabilityGarlicV1 deliberately - Task 5 (later in this
+		// Uses CapabilityGarlicV2 deliberately - Task 5 (later in this
 		// plan) renames it to CapabilityGarlicV2 and its grep-based
 		// propagation step picks up this reference along with every
 		// other one, so this test stays buildable at the point Task 4
 		// itself is executed.
-		path[i] = CapabilityMessage{Versions: []string{CapabilityGarlicV1}, PublicKey: id.PublicKey}
+		path[i] = CapabilityMessage{Versions: []string{CapabilityGarlicV2}, PublicKey: id.PublicKey}
 		nodeKeys[i] = []byte{byte('A' + i)} // stand-in Yggdrasil routing key
 	}
 	return path, nodeKeys

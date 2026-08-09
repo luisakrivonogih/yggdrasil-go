@@ -47,7 +47,7 @@ func FuzzBundleUnmarshal(f *testing.F) {
 }
 
 func FuzzCapabilityMessageUnmarshal(f *testing.F) {
-	valid := &CapabilityMessage{Versions: []string{CapabilityGarlicV1}, PublicKey: make([]byte, KeySize)}
+	valid := &CapabilityMessage{Versions: []string{CapabilityGarlicV2}, PublicKey: make([]byte, KeySize)}
 	validBytes, _ := valid.Marshal()
 	f.Add(validBytes)
 	f.Add([]byte{})

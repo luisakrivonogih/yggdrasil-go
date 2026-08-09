@@ -407,15 +407,15 @@ func TestProcessAnnounceSkipsEmptyKeyEntries(t *testing.T) {
 	}
 }
 
-func TestProcessCapabilityRequestAdvertisesGarlicV1(t *testing.T) {
+func TestProcessCapabilityRequestAdvertisesGarlicV2(t *testing.T) {
 	g := newTestGarlic(t)
 	resp := g.processCapabilityRequest()
 	msg, err := UnmarshalCapabilityMessage(resp)
 	if err != nil {
 		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
 	}
-	if !msg.SupportsGarlicV1() {
-		t.Error("response does not advertise garlic-v1")
+	if !msg.SupportsGarlicV2() {
+		t.Error("response does not advertise garlic-v2")
 	}
 	if !bytes.Equal(msg.PublicKey, g.identity.PublicKey) {
 		t.Errorf("response PublicKey = %x, want %x", msg.PublicKey, g.identity.PublicKey)

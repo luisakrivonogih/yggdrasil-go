@@ -243,7 +243,7 @@ func (g *Garlic) cleanupLoop() {
 
 // gossipTick sends this node's known-peer sample to a few
 // already-capability-verified peers (from capabilityCache, i.e. peers
-// this node has itself confirmed answer garlic-v1 - never an unverified
+// this node has itself confirmed answer garlic-v2 - never an unverified
 // discovery candidate), so discovery propagates without needing a
 // distributed directory.
 func (g *Garlic) gossipTick() {
@@ -391,10 +391,10 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 	ch := g.pending[key]
 	g.mu.Unlock()
 
-	// A successful, self-reported garlic-v1 response is exactly the
+	// A successful, self-reported garlic-v2 response is exactly the
 	// verification discovery candidates need before they're worth
 	// remembering - see discovery.go's doc comment.
-	if msg.SupportsGarlicV1() && len(msg.PublicKey) > 0 {
+	if msg.SupportsGarlicV2() && len(msg.PublicKey) > 0 {
 		g.discovery.record(DiscoveredPeer{NodeKey: append([]byte(nil), from...), GarlicPublicKey: msg.PublicKey})
 	}
 
