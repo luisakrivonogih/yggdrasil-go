@@ -128,6 +128,8 @@ var (
 	ErrCircuitNotFound   = errors.New("garlic: circuit not found")
 	ErrCapabilityTimeout = errors.New("garlic: capability request timed out")
 	ErrRecvTimeout       = errors.New("garlic: no message received before timeout")
+	ErrPoolNotFound      = errors.New("garlic: circuit pool not found")
+	ErrEmptyPool         = errors.New("garlic: circuit pool must have at least one path")
 )
 
 // DeliveredMessage is an application payload that arrived because this
@@ -158,6 +160,7 @@ type Garlic struct {
 	capabilityCache map[string]*CapabilityMessage
 	pending         map[string]chan *CapabilityMessage
 	originEphemeral map[CircuitID][]byte
+	pools           map[PoolID]*circuitPool
 
 	stop chan struct{}
 }
@@ -181,6 +184,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		capabilityCache: make(map[string]*CapabilityMessage),
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),
+		pools:           make(map[PoolID]*circuitPool),
 		stop:            make(chan struct{}),
 	}
 	g.scheduler = newJitterScheduler(func(data []byte, addr net.Addr) error {
@@ -508,6 +512,74 @@ func (g *Garlic) CloseCircuit(id CircuitID) {
 	g.mu.Lock()
 	delete(g.originEphemeral, id)
 	g.mu.Unlock()
+}
+
+// CreateCircuitPool builds len(paths) independent circuits (paths[i]/
+// nodeKeys[i] passed to CreateCircuit exactly as if called separately -
+// they need not share any hops) and groups them under one PoolID for
+// SendGarlicMultipath. If any path fails to build, every circuit already
+// created for this pool is closed and the error is returned - a pool is
+// all-or-nothing, never partially built.
+func (g *Garlic) CreateCircuitPool(paths [][]CapabilityMessage, nodeKeys [][][]byte) (PoolID, error) {
+	if len(paths) == 0 || len(paths) != len(nodeKeys) {
+		return 0, ErrEmptyPool
+	}
+	circuits := make([]CircuitID, 0, len(paths))
+	for i := range paths {
+		id, err := g.CreateCircuit(paths[i], nodeKeys[i])
+		if err != nil {
+			for _, c := range circuits {
+				g.CloseCircuit(c)
+			}
+			return 0, err
+		}
+		circuits = append(circuits, id)
+	}
+
+	poolID, err := randomPoolID()
+	if err != nil {
+		for _, c := range circuits {
+			g.CloseCircuit(c)
+		}
+		return 0, err
+	}
+	g.mu.Lock()
+	g.pools[poolID] = newCircuitPool(circuits)
+	g.mu.Unlock()
+	return poolID, nil
+}
+
+// ClosePool closes every circuit in pool and stops tracking it.
+func (g *Garlic) ClosePool(pool PoolID) {
+	g.mu.Lock()
+	p, ok := g.pools[pool]
+	delete(g.pools, pool)
+	g.mu.Unlock()
+	if !ok {
+		return
+	}
+	for _, id := range p.all() {
+		g.CloseCircuit(id)
+	}
+}
+
+// SendGarlicMultipath sends payload over the next circuit in pool
+// (round-robin), so consecutive calls spread traffic across every path
+// in the pool rather than concentrating it on one - see multipath.go's
+// doc comment for why this matters against a Sybil or traffic-
+// correlation adversary who doesn't control every path.
+func (g *Garlic) SendGarlicMultipath(pool PoolID, payload []byte) error {
+	g.mu.Lock()
+	p, ok := g.pools[pool]
+	g.mu.Unlock()
+	if !ok {
+		return ErrPoolNotFound
+	}
+	id, ok := p.nextCircuit()
+	if !ok {
+		return ErrPoolNotFound
+	}
+	return g.SendGarlic(id, payload)
 }
 
 // SendGarlic seals payload as one packet over the circuit id (previously

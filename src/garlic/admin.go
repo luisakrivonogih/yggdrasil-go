@@ -230,6 +230,94 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}
 			return map[string]interface{}{}, nil
 		})
+
+	_ = a.AddHandler("createGarlicCircuitPool", "Build several independent circuits at once; paths are semicolon-separated, hops within a path comma-separated (e.g. \"keyB;keyC\" for two 1-hop paths)", []string{"paths"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Paths string `json:"paths"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			pathStrs := strings.Split(req.Paths, ";")
+			paths := make([][]CapabilityMessage, len(pathStrs))
+			nodeKeys := make([][][]byte, len(pathStrs))
+			for i, pathStr := range pathStrs {
+				hops := splitCommaList(pathStr)
+				path := make([]CapabilityMessage, len(hops))
+				keys := make([][]byte, len(hops))
+				for j, h := range hops {
+					key, err := hex.DecodeString(h)
+					if err != nil {
+						return nil, fmt.Errorf("path %d hop %d: invalid key: %w", i, j, err)
+					}
+					capability, err := g.QueryCapability(key)
+					if err != nil {
+						return nil, fmt.Errorf("path %d hop %d: %w", i, j, err)
+					}
+					path[j] = *capability
+					keys[j] = key
+				}
+				paths[i] = path
+				nodeKeys[i] = keys
+			}
+			pool, err := g.CreateCircuitPool(paths, nodeKeys)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"poolId": poolIDToString(pool)}, nil
+		})
+
+	_ = a.AddHandler("closeGarlicCircuitPool", "Close every circuit in a pool", []string{"poolId"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				PoolID string `json:"poolId"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			pool, err := poolIDFromString(req.PoolID)
+			if err != nil {
+				return nil, err
+			}
+			g.ClosePool(pool)
+			return map[string]interface{}{}, nil
+		})
+
+	_ = a.AddHandler("sendGarlicMultipath", "Send a hex-encoded payload over the next circuit in a pool (round-robin)", []string{"poolId", "payload"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				PoolID  string `json:"poolId"`
+				Payload string `json:"payload"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			pool, err := poolIDFromString(req.PoolID)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := hex.DecodeString(req.Payload)
+			if err != nil {
+				return nil, fmt.Errorf("invalid payload: %w", err)
+			}
+			if err := g.SendGarlicMultipath(pool, payload); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{}, nil
+		})
+}
+
+func poolIDToString(id PoolID) string {
+	return fmt.Sprintf("%d", uint64(id))
+}
+
+func poolIDFromString(s string) (PoolID, error) {
+	var id uint64
+	if _, err := fmt.Sscanf(s, "%d", &id); err != nil {
+		return 0, fmt.Errorf("invalid poolId: %w", err)
+	}
+	return PoolID(id), nil
 }
 
 // parseSecondsOrDefault parses s as a floating-point number of seconds,
