@@ -10,18 +10,44 @@ not the aspirational full design in `docs/garlic-architecture.md`.
 
 ## Passive observer (watches network traffic, not a participant)
 
-**Can see:** that two Yggdrasil nodes are exchanging encrypted traffic
-(ironwood's own transport-layer encryption already hides payload from
-anyone who isn't one of the two communicating keys — true for Garlic
-traffic exactly as it's true for ordinary IPv6 traffic, and not a
-property this project adds). Packet sizes and timing on links it can
-observe. Whether a given link carries `typeSessionGarlic`-tagged traffic
-is **not** visible — the tag byte is inside ironwood's own encrypted
-payload.
+**Can see:** that two Yggdrasil nodes are exchanging encrypted traffic.
+Packet sizes and timing on links it can observe. Whether a given link
+carries `typeSessionGarlic`-tagged traffic is **not** visible from
+payload content alone — the tag byte is inside the `encrypted` package's
+per-session ciphertext (`golang.org/x/crypto`-based box seal in
+`ironwood/encrypted/session.go`), exactly like the tag byte for ordinary
+IPv6 traffic or NodeInfo queries. This part of the original doc's claim
+holds.
 
-**Cannot see:** the plaintext of any onion layer, which of possibly
-several bundled/relayed messages correspond to which real sender, or
-(without controlling a circuit's hops) the full path a circuit takes.
+**Correction from an earlier version of this document — read carefully,
+this is not a property Garlic adds or can fix:** ironwood's `network`
+package (the layer *below* `encrypted`, doing tree/DHT-based routing) is
+**not** payload encryption and does not hide *who is talking to whom*.
+The wire `traffic` struct (`ironwood/network/traffic.go`) carries
+`source publicKey` and `dest publicKey` as plain, unencrypted fields
+alongside the (encrypted) `payload` — only the payload is protected by
+`encrypted`'s session layer. Route discovery is worse: when a node has
+no cached path to a destination, it sends a `pathLookup{source, dest}`
+that gets **multicast to a bloom-filter-scoped subset of the tree**
+(`network/pathfinder.go`, `_sendLookup`/`_handleLookup`) — meaning
+several real intermediate nodes, not just the two endpoints, see the
+plaintext key pair "A wants to reach B" as a matter of normal protocol
+operation, not a compromise. **Any node that decodes a `traffic` or
+`pathLookup` packet - which every relay does as part of ordinary
+forwarding - has `source`/`dest` sitting in memory**, whether or not its
+own forwarding logic happens to need them (for already-pathed
+`traffic`, the fast path only consults `path`/`peerPort` and doesn't
+need `source`/`dest` to forward correctly - but the fields are decoded
+into the struct regardless, and nothing stops a modified build from
+logging them). This is true of vanilla Yggdrasil today, independent of
+Garlic entirely, and it materially affects every "can this relay learn
+who's talking to whom" question below - see `docs/garlic-security.md`'s
+discussion of what this changes.
+
+**Cannot see (still true):** the plaintext of any onion layer, or which
+of possibly several bundled messages correspond to which real sender.
+The above correction is about *routing metadata* (which keys exchanged
+traffic), not payload.
 
 ## Malicious relay (one Garlic-capable circuit hop, not colluding)
 
@@ -48,6 +74,39 @@ have. This is a deliberate simplification (documented in
 handshake for a much simpler non-interactive construction) and a
 concrete item for a future hardening pass, not a hidden defect.
 
+## Mesh-path intermediate node (not a chosen circuit hop, sits on the route between two of them)
+
+This category didn't exist in the original version of this document and
+follows directly from the correction above. When circuit hop *i* sends a
+`msgTypeCircuitData` message to hop *i+1*, that's one ironwood
+`encrypted` session, and per the mesh routing layer's own design, it may
+transit any number of ordinary Yggdrasil nodes at the `network` layer to
+get there (`docs/garlic-compatibility.md` calls this "role 1"). Per the
+correction above, **any one of those in-between nodes can see the real
+node keys of hop *i* and hop *i+1*** (via `traffic.source`/`dest`, or via
+a `pathLookup` if no path was cached yet) — the same visibility a
+"malicious relay" (a chosen Garlic hop) has into its *own* immediate
+neighbors, except this adversary never had to be selected as a circuit
+hop at all. It still cannot decrypt the `encrypted` session payload
+(so no `LayerPlaintext`, no onion content), and it still can't tell
+which position in the circuit it's observing traffic for, or correlate
+it to a specific circuit ID without also being one of the two Garlic
+identities exchanging that traffic. But it can build a graph of
+"Garlic-tagged-looking traffic volumes between key X and key Y" (traffic
+*is* observable in size/timing/existence even without decrypting it or
+knowing it's Garlic) for every hop-pair a circuit's path happens to
+route through — for free, without running any Garlic code, just by
+sitting in the right place in the mesh topology.
+
+**Why this matters for path selection:** an adversary doesn't need to be
+*chosen* as a Garlic hop to gain this visibility for a given hop-pair —
+they only need to be topologically positioned on the route ironwood's
+routing would pick between two chosen hops. This is a concrete point in
+favor of the "topologically diverse hop selection" idea discussed
+separately (see the conversation this document was updated from) as a
+way to make an adversary's job harder without needing every relay to run
+Garlic-aware code.
+
 ## Malicious introduction point
 
 Not exercised by any current code path beyond `Rendezvous.Publish` — see
@@ -71,15 +130,25 @@ visibility into both ends; this is expected of a 1-hop path and is why
 
 ## Global passive adversary (observes a large fraction of the network)
 
-Retains real capability. Multi-hop relaying raises the cost of
-correlating a circuit's endpoints — an adversary must observe (or
-compromise) enough of the path simultaneously — but this project does
-**not** claim to defeat a global adversary. No padding, cover traffic, or
-timing obfuscation is active by default in this version (`Envelope.PadTo`
-and `Bundle.AddCoverMessage` are implemented, tested primitives — see
-`docs/garlic-protocol.md` §7 — but are not wired into `SendGarlic`'s
-default send path). Until they are, packet size and timing on a given
-link are exactly what they'd be without Garlic, which is meaningful
+Retains real capability, **more than the pre-correction version of this
+document implied.** Because ironwood's own routing layer exposes real
+source/dest keys to intermediate nodes (see the correction above), a
+global adversary doesn't need to compromise payload encryption at all —
+observing enough of the mesh already gives it the same
+"key X talked to key Y, this much data, at this time" graph an adversary
+watching an unencrypted network would have, for every hop-to-hop link a
+circuit's path touches, chosen-hop or not. Multi-hop relaying still
+raises the cost of correlating a circuit's *true* endpoints specifically
+(the adversary has to link multiple such hop-pair observations into one
+circuit, which requires more than any single vantage point gives it) but
+this project does **not** claim to defeat a global adversary, and should
+be read as claiming *less* than before this correction, not the same. No
+padding, cover traffic, or timing obfuscation is active by default in
+this version (`Envelope.PadTo` and `Bundle.AddCoverMessage` are
+implemented, tested primitives — see `docs/garlic-protocol.md` §7 — but
+are not wired into `SendGarlic`'s default send path). Until they are,
+packet size and timing on a given link are exactly what they'd be
+without Garlic, which is meaningful
 metadata to a global adversary.
 
 ## Traffic correlation / traffic confirmation
@@ -153,12 +222,13 @@ correlates to one circuit's identity).
 
 | Adversary | Real capability retained |
 |---|---|
-| Passive observer | Sees encrypted traffic exists; not Garlic-specific, not payload |
-| Single malicious relay | Sees only its own hop's neighbors; cannot decrypt other layers; ephemeral-key reuse is a linkability signal if colluding with another hop |
+| Passive observer | Sees traffic exists, sizes, timing; not payload. Cannot see the Garlic tag itself (inside the encrypted session) |
+| Single malicious relay (chosen Garlic hop) | Sees its own hop's real-key neighbors (unavoidable, via ironwood's own unencrypted `source`/`dest` fields, not something Garlic hides); cannot decrypt other layers; ephemeral-key reuse is a linkability signal if colluding with another hop |
+| Mesh-path intermediate node (not a chosen hop) | Same real-key-pair visibility as a malicious relay, for any hop-pair its position sits between - without ever being selected as a circuit hop. New finding, see dedicated section above |
 | Malicious introduction point | Sees GID lookups; payload only if also the terminal hop |
 | Malicious endpoint | Sees delivered payload (expected) and its own previous hop |
-| Global passive adversary | Real capability - no padding/cover traffic active by default |
-| Traffic correlation | Real capability - same reason |
+| Global passive adversary | Real capability, stronger than a naive reading of "payload is encrypted" suggests - routing metadata (who talks to whom) is not encrypted at the ironwood network layer at all |
+| Traffic correlation | Real capability - no padding/cover traffic active by default |
 | Replay | Mitigated within the bounded replay window |
 | Packet tagging | Mitigated by AEAD authentication |
 | Route manipulation | N/A - no automated path selection exists yet to manipulate |

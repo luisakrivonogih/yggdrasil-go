@@ -90,12 +90,24 @@ need to be rebuilt.
   doing so at the routing layer, blind to payload content, exactly as they
   are for ordinary IPv6 traffic today. Garlic doesn't need to invent this
   property — it's inherited for free from the base network.
-- What ironwood's per-hop encryption does *not* hide is the
-  metadata/relationship: that node A directly exchanged an end-to-end
-  session with node B at all (routing coordinates, tree/DHT structure,
-  directly observable by A's and B's own peers, and to some extent by
-  passive observers of the topology). That's the actual gap Garlic exists to
-  address — see §7.
+- **Correction, found by reading `ironwood/network/traffic.go` and
+  `pathfinder.go` directly:** what ironwood's per-hop encryption does
+  *not* hide is stronger than "some metadata" — the `network` layer's
+  wire `traffic` struct carries `source`/`dest` as **plain, unencrypted
+  fields**, separate from the (encrypted) `payload`. Any relay that
+  decodes a `traffic` packet — which every relay does, as a normal part
+  of forwarding — has the real sender and recipient keys in hand,
+  whether or not its own forwarding logic (which for an
+  already-cached path only needs the `path`/`peerPort` prefix) happens
+  to use them. Route discovery is worse: a `pathLookup{source, dest}`
+  for an uncached destination is multicast to a bloom-filter-scoped
+  subset of the tree, so several real nodes (not just A's and B's direct
+  peers) see the plaintext key pair as a matter of ordinary protocol
+  operation. This is true of vanilla Yggdrasil, independent of Garlic
+  entirely — Garlic cannot fix it without changing ironwood, and this
+  document originally understated it. See `docs/garlic-threat-model.md`
+  ("Mesh-path intermediate node") for the full analysis and what it
+  changes for circuit-hop selection.
 
 ### 1.6 In-band session multiplexing (the key extension point)
 

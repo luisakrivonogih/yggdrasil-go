@@ -51,6 +51,19 @@ circuit necessarily learns the *sender's* real node key (someone has to
 address the first packet), which is standard for onion routing and
 stated plainly in the threat model rather than hidden.
 
+**Correction:** this section originally stopped there, implying the
+*only* leakage was the expected first-hop one. Re-reading
+`ironwood/network/traffic.go` and `pathfinder.go` directly found more:
+the real node keys of **every** hop-to-hop link in a circuit (not just
+the first) are visible in cleartext to any node on the underlying mesh
+path between those two hops - not because Garlic leaks them, but because
+ironwood's own `network` layer carries `source`/`dest` as unencrypted
+wire fields, separate from the `encrypted` package's payload protection.
+See `docs/garlic-threat-model.md`'s "Mesh-path intermediate node"
+section for the full analysis. This doesn't change what Garlic itself
+does, but it does mean "a relay only sees its own neighbors" understates
+who can gain that same visibility.
+
 ## Timing leakage
 
 Not actively mitigated. `SendGarlic` sends immediately; there is no
@@ -71,9 +84,15 @@ requires no new cryptography, just plumbing.
 ## Route / destination leakage
 
 Covered per-adversary-class in `docs/garlic-threat-model.md`. Summary:
-each hop learns only its immediate neighbors; the terminal hop learns
-the payload (by design) and its immediate predecessor; nothing learns
-the full path except the originator, who chose it.
+each *Garlic* hop learns only its immediate neighbors at the onion-layer
+level; the terminal hop learns the payload (by design) and its immediate
+predecessor; nothing learns the full path except the originator, who
+chose it. That summary is still accurate for the onion layer itself, but
+per the correction above, "learns its immediate neighbors" is also true
+of any node on the mesh path *between* two Garlic hops, whether or not
+it's a chosen hop - the onion layer's own confidentiality guarantees are
+unaffected, but the pool of parties who can observe a given hop-pair's
+existence is larger than "the two hops" alone.
 
 ## Replay
 
