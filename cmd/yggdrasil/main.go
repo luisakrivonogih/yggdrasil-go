@@ -296,15 +296,15 @@ func main() {
 	{
 		if cfg.Garlic.Enabled {
 			var identity *garlic.Identity
-			if len(cfg.Garlic.PrivateKey) > 0 {
-				if identity, err = garlic.LoadIdentityFromPrivateKey(cfg.Garlic.PrivateKey); err != nil {
+			if len(cfg.Garlic.PrivateKey) > 0 && len(cfg.Garlic.SigningPrivateKey) > 0 {
+				if identity, err = garlic.LoadIdentityFromPrivateKeys(cfg.Garlic.PrivateKey, cfg.Garlic.SigningPrivateKey); err != nil {
 					panic(err)
 				}
 			} else {
 				if identity, err = garlic.NewIdentity(); err != nil {
 					panic(err)
 				}
-				logger.Warnln("No Garlic.PrivateKey configured - generated an ephemeral Garlic identity for this run only")
+				logger.Warnln("No Garlic.PrivateKey/SigningPrivateKey configured - generated ephemeral Garlic identity keys for this run only")
 			}
 			lifetime, err := time.ParseDuration(cfg.Garlic.CircuitLifetime)
 			if err != nil {
