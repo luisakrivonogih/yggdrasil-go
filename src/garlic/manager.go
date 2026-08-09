@@ -18,6 +18,7 @@ package garlic
 // limitation documented in docs/garlic-security.md.
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
@@ -271,13 +272,34 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 // circuit hop or rendezvous point.
 func (g *Garlic) QueryCapability(peer ed25519.PublicKey) (*CapabilityMessage, error) {
 	key := hex.EncodeToString(peer)
-
 	g.mu.Lock()
 	if cached, ok := g.capabilityCache[key]; ok {
 		g.mu.Unlock()
 		return cached, nil
 	}
+	g.mu.Unlock()
+	return g.requestCapability(peer)
+}
+
+// PingCapability behaves like QueryCapability but always sends a fresh
+// request - ignoring any cached result - and additionally reports the
+// measured round-trip time. Intended for topology-aware hop selection
+// (see HopCount), where a stale cached answer wouldn't reflect current
+// latency. The result still updates the capability cache, same as
+// QueryCapability.
+func (g *Garlic) PingCapability(peer ed25519.PublicKey) (*CapabilityMessage, time.Duration, error) {
+	start := time.Now()
+	msg, err := g.requestCapability(peer)
+	if err != nil {
+		return nil, 0, err
+	}
+	return msg, time.Since(start), nil
+}
+
+func (g *Garlic) requestCapability(peer ed25519.PublicKey) (*CapabilityMessage, error) {
+	key := hex.EncodeToString(peer)
 	ch := make(chan *CapabilityMessage, 1)
+	g.mu.Lock()
 	g.pending[key] = ch
 	g.mu.Unlock()
 	defer func() {
@@ -295,6 +317,24 @@ func (g *Garlic) QueryCapability(peer ed25519.PublicKey) (*CapabilityMessage, er
 	case <-time.After(g.cfg.CapabilityTimeout):
 		return nil, ErrCapabilityTimeout
 	}
+}
+
+// HopCount returns the number of mesh hops to peer, if this node has a
+// cached path to it (e.g. from a prior capability query or any other
+// traffic exchanged with that key) - see core.Core.GetPaths. ok is false
+// if no path is cached yet; querying capability first typically resolves
+// one as a side effect of the round trip.
+func (g *Garlic) HopCount(peer ed25519.PublicKey) (hops int, ok bool) {
+	return hopCountFromPaths(g.core.GetPaths(), peer)
+}
+
+func hopCountFromPaths(paths []core.PathEntryInfo, peer ed25519.PublicKey) (int, bool) {
+	for _, p := range paths {
+		if bytes.Equal(p.Key, peer) {
+			return len(p.Path), true
+		}
+	}
+	return 0, false
 }
 
 // CreateCircuit builds and tracks a new circuit over path, an ordered

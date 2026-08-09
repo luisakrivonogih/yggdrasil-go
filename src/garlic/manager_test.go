@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 	"time"
+
+	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 )
 
 func TestBuildCircuitDataMessageAppliesRandomPadding(t *testing.T) {
@@ -63,6 +65,38 @@ func TestBuildCircuitDataMessageSkipsPaddingWhenDisabled(t *testing.T) {
 	}
 	if len(env.Padding) != 0 {
 		t.Fatalf("Padding = %d bytes, want 0 (padding disabled)", len(env.Padding))
+	}
+}
+
+func TestHopCountFromPathsFindsMatchingKey(t *testing.T) {
+	peer := []byte("peer-key")
+	paths := []core.PathEntryInfo{
+		{Key: []byte("other-key"), Path: []uint64{1, 2}},
+		{Key: peer, Path: []uint64{1, 2, 3, 4}},
+	}
+	hops, ok := hopCountFromPaths(paths, peer)
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if hops != 4 {
+		t.Fatalf("hops = %d, want 4", hops)
+	}
+}
+
+func TestHopCountFromPathsMissingKeyReturnsFalse(t *testing.T) {
+	paths := []core.PathEntryInfo{
+		{Key: []byte("other-key"), Path: []uint64{1, 2}},
+	}
+	_, ok := hopCountFromPaths(paths, []byte("unknown-peer"))
+	if ok {
+		t.Fatal("ok = true, want false for a peer with no cached path")
+	}
+}
+
+func TestHopCountFromPathsEmptyList(t *testing.T) {
+	_, ok := hopCountFromPaths(nil, []byte("peer"))
+	if ok {
+		t.Fatal("ok = true, want false for an empty path list")
 	}
 }
 
