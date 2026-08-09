@@ -83,6 +83,42 @@ func FuzzProcessCircuitData(f *testing.F) {
 // buildTestCircuitDataForFuzz is a minimal standalone variant of
 // buildTestCircuitData (relay_logic_test.go) that doesn't depend on
 // *testing.T, since Fuzz seed setup runs outside a single subtest.
+func FuzzLayerPlaintextUnmarshal(f *testing.F) {
+	valid := &LayerPlaintext{
+		NextHop:          []byte("next-hop-key"),
+		NextHopEphemeral: make([]byte, KeySize),
+		Inner:            []byte("inner ciphertext"),
+	}
+	validBytes, _ := valid.marshal()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 0})       // empty next_hop, truncated before the flag byte
+	f.Add([]byte{0, 0, 0, 0, 1})    // flag says "ephemeral present" but provides none
+	f.Add([]byte{0, 0, 0, 0, 2})    // invalid flag byte
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = unmarshalLayerPlaintext(data)
+	})
+}
+
+func FuzzServiceDescriptorFieldsUnmarshal(f *testing.F) {
+	id, err := NewIdentity()
+	if err != nil {
+		f.Fatalf("NewIdentity returned error: %v", err)
+	}
+	d, err := SignServiceDescriptor(id.SigningPublicKey, id.SigningPrivateKey, []byte("svc"), []IntroPoint{{NodeKey: []byte("intro")}}, 1000, 2000)
+	if err != nil {
+		f.Fatalf("SignServiceDescriptor returned error: %v", err)
+	}
+	validBytes, _ := d.signedBytes()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0})
+	f.Add([]byte{255})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = unmarshalServiceDescriptorFields(data)
+	})
+}
+
 func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration) ([]byte, error) {
 	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
 	if err != nil {

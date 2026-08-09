@@ -144,3 +144,26 @@ func TestSignedBytesExcludeSignatureField(t *testing.T) {
 		t.Error("signedBytes includes the Signature field itself - the signature would cover its own bytes")
 	}
 }
+
+func TestUnmarshalServiceDescriptorFieldsRoundTripsSignedBytes(t *testing.T) {
+	id := testDescriptorIdentity(t)
+	d, err := SignServiceDescriptor(id.SigningPublicKey, id.SigningPrivateKey, []byte("svc"), []IntroPoint{{NodeKey: []byte("intro")}}, 1000, 2000)
+	if err != nil {
+		t.Fatalf("SignServiceDescriptor returned error: %v", err)
+	}
+	encoded, err := d.signedBytes()
+	if err != nil {
+		t.Fatalf("signedBytes returned error: %v", err)
+	}
+	got, err := unmarshalServiceDescriptorFields(encoded)
+	if err != nil {
+		t.Fatalf("unmarshalServiceDescriptorFields returned error: %v", err)
+	}
+	if got.Version != d.Version || !bytes.Equal(got.ServicePublicKey, d.ServicePublicKey) ||
+		!bytes.Equal(got.ServiceID, d.ServiceID) || got.PublishedAt != d.PublishedAt || got.ExpiresAt != d.ExpiresAt {
+		t.Fatalf("round-tripped fields = %+v, want to match %+v", got, d)
+	}
+	if len(got.IntroPoints) != 1 || !bytes.Equal(got.IntroPoints[0].NodeKey, []byte("intro")) {
+		t.Fatalf("round-tripped IntroPoints = %+v", got.IntroPoints)
+	}
+}

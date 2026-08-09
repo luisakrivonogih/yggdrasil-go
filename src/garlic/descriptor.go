@@ -35,6 +35,7 @@ var (
 	ErrInvalidDescriptorSignature   = errors.New("garlic: service descriptor signature invalid")
 	ErrDescriptorGIDMismatch        = errors.New("garlic: service descriptor does not match requested GID")
 	ErrDescriptorExpired            = errors.New("garlic: service descriptor expired")
+	ErrDescriptorTruncated          = errors.New("garlic: service descriptor truncated")
 )
 
 // ServiceDescriptor is the signed, self-certifying binding between a
@@ -81,6 +82,74 @@ func (d *ServiceDescriptor) signedBytes() ([]byte, error) {
 	buf = binary.BigEndian.AppendUint64(buf, d.PublishedAt)
 	buf = binary.BigEndian.AppendUint64(buf, d.ExpiresAt)
 	return buf, nil
+}
+
+// unmarshalServiceDescriptorFields parses the signedBytes() encoding
+// back into field values, without a Signature (there is none in that
+// encoding) or version-specific dispatch beyond checking Version. This
+// exists for fuzz coverage of the encoding's bounds-checking - nothing
+// in this package currently deserializes a ServiceDescriptor from raw
+// bytes in production (descriptors flow through Rendezvous as Go
+// structs, not wire bytes), but the encoding shares the same untrusted-
+// length-prefix shape as every parser in this package that does, so it
+// gets the same fuzz discipline.
+func unmarshalServiceDescriptorFields(data []byte) (*ServiceDescriptor, error) {
+	if len(data) < 1+ed25519.PublicKeySize {
+		return nil, ErrDescriptorTruncated
+	}
+	d := &ServiceDescriptor{Version: data[0]}
+	if d.Version != ServiceDescriptorVersion1 {
+		return nil, ErrUnsupportedDescriptorVersion
+	}
+	rest := data[1:]
+	d.ServicePublicKey = append(ed25519.PublicKey(nil), rest[:ed25519.PublicKeySize]...)
+	rest = rest[ed25519.PublicKeySize:]
+
+	if len(rest) < 4 {
+		return nil, ErrDescriptorTruncated
+	}
+	serviceIDLen := binary.BigEndian.Uint32(rest[:4])
+	rest = rest[4:]
+	if serviceIDLen > maxServiceIDSize {
+		return nil, ErrServiceIDTooLarge
+	}
+	if uint64(serviceIDLen) > uint64(len(rest)) {
+		return nil, ErrDescriptorTruncated
+	}
+	d.ServiceID = append([]byte(nil), rest[:serviceIDLen]...)
+	rest = rest[serviceIDLen:]
+
+	if len(rest) < 4 {
+		return nil, ErrDescriptorTruncated
+	}
+	pointCount := binary.BigEndian.Uint32(rest[:4])
+	rest = rest[4:]
+	if pointCount > MaxIntroPoints {
+		return nil, ErrTooManyIntroPoints
+	}
+	d.IntroPoints = make([]IntroPoint, 0, pointCount)
+	for range pointCount {
+		if len(rest) < 1 {
+			return nil, ErrDescriptorTruncated
+		}
+		n := int(rest[0])
+		rest = rest[1:]
+		if n > maxCapabilityKeyLen {
+			return nil, ErrCapabilityKeyTooLong
+		}
+		if n > len(rest) {
+			return nil, ErrDescriptorTruncated
+		}
+		d.IntroPoints = append(d.IntroPoints, IntroPoint{NodeKey: append([]byte(nil), rest[:n]...)})
+		rest = rest[n:]
+	}
+
+	if len(rest) < 16 {
+		return nil, ErrDescriptorTruncated
+	}
+	d.PublishedAt = binary.BigEndian.Uint64(rest[:8])
+	d.ExpiresAt = binary.BigEndian.Uint64(rest[8:16])
+	return d, nil
 }
 
 // SignServiceDescriptor builds and signs a ServiceDescriptor for
