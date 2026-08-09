@@ -24,11 +24,13 @@ const (
 )
 
 var (
-	ErrEmptyPath          = errors.New("garlic: onion path must have at least one hop")
-	ErrLayerTooShort      = errors.New("garlic: layer plaintext shorter than fixed header")
-	ErrLayerTruncated     = errors.New("garlic: layer plaintext truncated")
-	ErrNextHopTooLarge    = errors.New("garlic: next-hop field exceeds maximum size")
-	ErrLayerInnerTooLarge = errors.New("garlic: layer inner field exceeds maximum size")
+	ErrEmptyPath                   = errors.New("garlic: onion path must have at least one hop")
+	ErrLayerTooShort               = errors.New("garlic: layer plaintext shorter than fixed header")
+	ErrLayerTruncated              = errors.New("garlic: layer plaintext truncated")
+	ErrNextHopTooLarge             = errors.New("garlic: next-hop field exceeds maximum size")
+	ErrLayerInnerTooLarge          = errors.New("garlic: layer inner field exceeds maximum size")
+	ErrInvalidNextHopEphemeralSize = errors.New("garlic: next-hop ephemeral key has invalid size")
+	ErrInvalidNextHopEphemeralFlag = errors.New("garlic: invalid next-hop-ephemeral presence flag")
 )
 
 // Hop is one hop of a path used to build an onion (see BuildOnion). Key
@@ -36,31 +38,45 @@ var (
 // this hop within this circuit, and Counter must never repeat under that
 // Key.
 type Hop struct {
-	NodeKey []byte // this hop's Yggdrasil public key (routing address)
-	Key     []byte // per-hop symmetric key, already derived (e.g. via ECDH + DeriveKey)
-	Counter uint64 // nonce/replay counter for this hop's layer
+	NodeKey          []byte // this hop's Yggdrasil public key (routing address)
+	Key              []byte // per-hop symmetric key, already derived (e.g. via ECDH + deriveLayerKey)
+	Counter          uint64 // nonce/replay counter for this hop's layer
+	NextEphemeralPub []byte // ephemeral X25519 pubkey for the hop that follows this one; nil for the final hop
 }
 
-// LayerPlaintext is what a hop recovers after decrypting its layer: either
-// forwarding instructions (NextHop set, Inner is the ciphertext to forward
-// there) or, for the final hop, the delivered payload (NextHop empty,
-// Inner is the payload itself). A real NodeKey is never zero-length, so an
-// empty NextHop unambiguously marks the terminal hop.
+// LayerPlaintext is what a hop recovers after decrypting its layer:
+// either forwarding instructions (NextHop and NextHopEphemeral set,
+// Inner is the ciphertext to forward there) or, for the final hop, the
+// delivered payload (NextHop and NextHopEphemeral both empty, Inner is
+// the payload itself). NextHopEphemeral only ever becomes visible to
+// the hop that decrypts this exact layer - see docs/superpowers/specs/
+// 2026-08-09-garlic-crypto-hardening-design.md section A for why this
+// is what gives non-adjacent hops no ephemeral key in common.
 type LayerPlaintext struct {
-	NextHop []byte
-	Inner   []byte
+	NextHop          []byte
+	NextHopEphemeral []byte
+	Inner            []byte
 }
 
 func (l *LayerPlaintext) marshal() ([]byte, error) {
 	if len(l.NextHop) > MaxNextHopSize {
 		return nil, ErrNextHopTooLarge
 	}
+	if len(l.NextHopEphemeral) != 0 && len(l.NextHopEphemeral) != KeySize {
+		return nil, ErrInvalidNextHopEphemeralSize
+	}
 	if len(l.Inner) > MaxLayerInnerSize {
 		return nil, ErrLayerInnerTooLarge
 	}
-	buf := make([]byte, 0, 4+len(l.NextHop)+4+len(l.Inner))
+	buf := make([]byte, 0, 4+len(l.NextHop)+1+len(l.NextHopEphemeral)+4+len(l.Inner))
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(l.NextHop)))
 	buf = append(buf, l.NextHop...)
+	if len(l.NextHopEphemeral) == KeySize {
+		buf = append(buf, 1)
+		buf = append(buf, l.NextHopEphemeral...)
+	} else {
+		buf = append(buf, 0)
+	}
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(l.Inner)))
 	buf = append(buf, l.Inner...)
 	return buf, nil
@@ -83,6 +99,24 @@ func unmarshalLayerPlaintext(data []byte) (*LayerPlaintext, error) {
 		l.NextHop = append([]byte(nil), rest[:nextHopLen]...)
 	}
 	rest = rest[nextHopLen:]
+
+	if len(rest) < 1 {
+		return nil, ErrLayerTruncated
+	}
+	hasNextEphemeral := rest[0]
+	rest = rest[1:]
+	switch hasNextEphemeral {
+	case 1:
+		if uint64(KeySize) > uint64(len(rest)) {
+			return nil, ErrLayerTruncated
+		}
+		l.NextHopEphemeral = append([]byte(nil), rest[:KeySize]...)
+		rest = rest[KeySize:]
+	case 0:
+		// no next-hop ephemeral key - terminal hop.
+	default:
+		return nil, ErrInvalidNextHopEphemeralFlag
+	}
 
 	if len(rest) < 4 {
 		return nil, ErrLayerTruncated
@@ -140,8 +174,9 @@ func BuildOnion(hops []Hop, payload []byte) ([]byte, error) {
 			nextHop = hops[i+1].NodeKey
 		}
 		ct, err := EncryptLayer(hops[i].Key, hops[i].Counter, &LayerPlaintext{
-			NextHop: nextHop,
-			Inner:   inner,
+			NextHop:          nextHop,
+			NextHopEphemeral: hops[i].NextEphemeralPub,
+			Inner:            inner,
 		})
 		if err != nil {
 			return nil, err

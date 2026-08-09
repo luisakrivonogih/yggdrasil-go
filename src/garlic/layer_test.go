@@ -93,14 +93,80 @@ func TestDecryptLayerRejectsMalformedPlaintext(t *testing.T) {
 	}
 }
 
+func TestLayerPlaintextRoundTripsNextHopEphemeral(t *testing.T) {
+	key, _ := DeriveKey([]byte("hop secret"), nil, LabelCircuitDataSend)
+	nextEphemeral := bytes.Repeat([]byte{0xAB}, KeySize)
+	layer := &LayerPlaintext{
+		NextHop:          []byte("next-hop-node-key-bytes"),
+		NextHopEphemeral: nextEphemeral,
+		Inner:            []byte("inner ciphertext to forward"),
+	}
+
+	ct, err := EncryptLayer(key, 1, layer)
+	if err != nil {
+		t.Fatalf("EncryptLayer returned error: %v", err)
+	}
+	got, err := DecryptLayer(key, 1, ct)
+	if err != nil {
+		t.Fatalf("DecryptLayer returned error: %v", err)
+	}
+	if !bytes.Equal(got.NextHopEphemeral, nextEphemeral) {
+		t.Errorf("NextHopEphemeral = %x, want %x", got.NextHopEphemeral, nextEphemeral)
+	}
+}
+
+func TestLayerPlaintextTerminalHopHasNoNextHopEphemeral(t *testing.T) {
+	key, _ := DeriveKey([]byte("hop secret"), nil, LabelCircuitDataSend)
+	layer := &LayerPlaintext{Inner: []byte("final payload")}
+
+	ct, err := EncryptLayer(key, 1, layer)
+	if err != nil {
+		t.Fatalf("EncryptLayer returned error: %v", err)
+	}
+	got, err := DecryptLayer(key, 1, ct)
+	if err != nil {
+		t.Fatalf("DecryptLayer returned error: %v", err)
+	}
+	if len(got.NextHopEphemeral) != 0 {
+		t.Errorf("NextHopEphemeral = %x, want empty (terminal hop)", got.NextHopEphemeral)
+	}
+}
+
+func TestLayerPlaintextMarshalRejectsWrongSizeNextHopEphemeral(t *testing.T) {
+	l := &LayerPlaintext{NextHopEphemeral: []byte("too short")}
+	if _, err := l.marshal(); err == nil {
+		t.Fatal("expected error for a NextHopEphemeral that isn't exactly KeySize bytes, got nil")
+	}
+}
+
+func TestUnmarshalLayerPlaintextRejectsInvalidEphemeralFlag(t *testing.T) {
+	// A hand-built plaintext: next_hop_len=0, then a flag byte that is
+	// neither 0 nor 1.
+	data := []byte{0, 0, 0, 0, 2}
+	if _, err := unmarshalLayerPlaintext(data); err == nil {
+		t.Fatal("expected error for an invalid has-next-ephemeral flag byte, got nil")
+	}
+}
+
+func TestUnmarshalLayerPlaintextRejectsTruncatedEphemeral(t *testing.T) {
+	// Claims a next ephemeral key is present (flag=1) but provides fewer
+	// than KeySize bytes for it.
+	data := []byte{0, 0, 0, 0, 1, 0xAB, 0xCD}
+	if _, err := unmarshalLayerPlaintext(data); err == nil {
+		t.Fatal("expected error for a truncated next-hop-ephemeral field, got nil")
+	}
+}
+
 func threeTestHops(t *testing.T) []Hop {
 	t.Helper()
 	keyA, _ := DeriveKey([]byte("secret A"), nil, LabelCircuitDataSend)
 	keyB, _ := DeriveKey([]byte("secret B"), nil, LabelCircuitDataSend)
 	keyC, _ := DeriveKey([]byte("secret C"), nil, LabelCircuitDataSend)
+	ephB := bytes.Repeat([]byte{0x02}, KeySize)
+	ephC := bytes.Repeat([]byte{0x03}, KeySize)
 	return []Hop{
-		{NodeKey: []byte("node-A-key"), Key: keyA, Counter: 1},
-		{NodeKey: []byte("node-B-key"), Key: keyB, Counter: 1},
+		{NodeKey: []byte("node-A-key"), Key: keyA, Counter: 1, NextEphemeralPub: ephB},
+		{NodeKey: []byte("node-B-key"), Key: keyB, Counter: 1, NextEphemeralPub: ephC},
 		{NodeKey: []byte("node-C-key"), Key: keyC, Counter: 1},
 	}
 }
@@ -122,6 +188,9 @@ func TestBuildOnionThreeHopsEachHopPeelsOneLayer(t *testing.T) {
 	if !bytes.Equal(atA.NextHop, hops[1].NodeKey) {
 		t.Fatalf("hop A NextHop = %q, want %q", atA.NextHop, hops[1].NodeKey)
 	}
+	if !bytes.Equal(atA.NextHopEphemeral, hops[0].NextEphemeralPub) {
+		t.Fatalf("hop A NextHopEphemeral = %x, want %x", atA.NextHopEphemeral, hops[0].NextEphemeralPub)
+	}
 
 	// Hop B peels its layer: learns to forward to C.
 	atB, err := DecryptLayer(hops[1].Key, hops[1].Counter, atA.Inner)
@@ -130,6 +199,9 @@ func TestBuildOnionThreeHopsEachHopPeelsOneLayer(t *testing.T) {
 	}
 	if !bytes.Equal(atB.NextHop, hops[2].NodeKey) {
 		t.Fatalf("hop B NextHop = %q, want %q", atB.NextHop, hops[2].NodeKey)
+	}
+	if !bytes.Equal(atB.NextHopEphemeral, hops[1].NextEphemeralPub) {
+		t.Fatalf("hop B NextHopEphemeral = %x, want %x", atB.NextHopEphemeral, hops[1].NextEphemeralPub)
 	}
 
 	// Hop C peels its layer: this is terminal, recovers the real payload.
