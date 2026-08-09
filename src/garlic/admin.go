@@ -377,15 +377,20 @@ func splitCommaList(s string) []string {
 }
 
 func circuitIDToString(id CircuitID) string {
-	return fmt.Sprintf("%d", uint64(id))
+	return hex.EncodeToString(id[:])
 }
 
 func circuitIDFromString(s string) (CircuitID, error) {
-	var id uint64
-	if _, err := fmt.Sscanf(s, "%d", &id); err != nil {
-		return 0, fmt.Errorf("invalid circuitId: %w", err)
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return CircuitID{}, fmt.Errorf("invalid circuitId: %w", err)
 	}
-	return CircuitID(id), nil
+	if len(b) != len(CircuitID{}) {
+		return CircuitID{}, fmt.Errorf("invalid circuitId: want %d bytes, got %d", len(CircuitID{}), len(b))
+	}
+	var id CircuitID
+	copy(id[:], b)
+	return id, nil
 }
 
 func parseCircuitIDRequest(in json.RawMessage) (CircuitID, error) {
@@ -393,7 +398,7 @@ func parseCircuitIDRequest(in json.RawMessage) (CircuitID, error) {
 		CircuitID string `json:"circuitId"`
 	}
 	if err := json.Unmarshal(in, &req); err != nil {
-		return 0, err
+		return CircuitID{}, err
 	}
 	return circuitIDFromString(req.CircuitID)
 }

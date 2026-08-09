@@ -485,28 +485,28 @@ func hopCountFromPaths(paths []core.PathEntryInfo, peer ed25519.PublicKey) (int,
 // with SendGarlic and CloseCircuit.
 func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (CircuitID, error) {
 	if len(path) == 0 || len(path) != len(nodeKeys) {
-		return 0, ErrInvalidPath
+		return CircuitID{}, ErrInvalidPath
 	}
 	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
 	if err != nil {
-		return 0, err
+		return CircuitID{}, err
 	}
 	hops := make([]Hop, len(path))
 	for i := range path {
 		secret, err := ECDH(ephemeralPriv, path[i].PublicKey)
 		if err != nil {
-			return 0, err
+			return CircuitID{}, err
 		}
 		key, err := DeriveKey(secret, nil, LabelLayerKey)
 		if err != nil {
-			return 0, err
+			return CircuitID{}, err
 		}
 		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key}
 	}
 
 	c, err := g.circuits.Add(hops, g.cfg.CircuitLifetime, g.cfg.MaxPacketsPerCircuit, g.cfg.MaxBytesPerCircuit)
 	if err != nil {
-		return 0, err
+		return CircuitID{}, err
 	}
 
 	g.mu.Lock()
@@ -706,7 +706,7 @@ func buildCircuitDataMessage(ephemeralPub []byte, id CircuitID, counter, expirat
 func buildCircuitDataBody(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     uint64(id),
+		CircuitID:     id,
 		PacketCounter: counter,
 		Expiration:    expiration,
 		Body:          onion,

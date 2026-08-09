@@ -17,7 +17,7 @@ import (
 func FuzzEnvelopeUnmarshal(f *testing.F) {
 	valid := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     1,
+		CircuitID:     testCircuitID(1),
 		PacketCounter: 1,
 		Expiration:    9999999999,
 		Body:          []byte("hello"),
@@ -106,7 +106,7 @@ func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration
 	}
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     uint64(c.ID),
+		CircuitID:     c.ID,
 		PacketCounter: counter,
 		Expiration:    uint64(time.Now().Add(ttl).Unix()),
 		Body:          onion,

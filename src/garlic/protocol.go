@@ -78,7 +78,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 		return circuitAction{kind: actionDrop}
 	}
 
-	circuitID := CircuitID(env.CircuitID)
+	circuitID := env.CircuitID
 	window, ok := g.relayState.replayWindowFor(circuitID)
 	if !ok || !window.CheckAndSet(env.PacketCounter) {
 		return circuitAction{kind: actionDrop}

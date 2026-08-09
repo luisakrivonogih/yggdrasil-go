@@ -7,7 +7,7 @@ import (
 
 func TestRelayCircuitStateCreatesWindowOnFirstUse(t *testing.T) {
 	s := newRelayCircuitState(1024)
-	w, ok := s.replayWindowFor(CircuitID(1))
+	w, ok := s.replayWindowFor(testCircuitID(1))
 	if !ok {
 		t.Fatal("replayWindowFor ok = false, want true")
 	}
@@ -18,8 +18,8 @@ func TestRelayCircuitStateCreatesWindowOnFirstUse(t *testing.T) {
 
 func TestRelayCircuitStateReturnsSameWindowForSameCircuit(t *testing.T) {
 	s := newRelayCircuitState(1024)
-	w1, _ := s.replayWindowFor(CircuitID(1))
-	w2, _ := s.replayWindowFor(CircuitID(1))
+	w1, _ := s.replayWindowFor(testCircuitID(1))
+	w2, _ := s.replayWindowFor(testCircuitID(1))
 	if w1 != w2 {
 		t.Error("replayWindowFor returned different windows for the same circuit ID")
 	}
@@ -35,17 +35,17 @@ func TestRelayCircuitStateReturnsSameWindowForSameCircuit(t *testing.T) {
 
 func TestRelayCircuitStateBoundedCapacity(t *testing.T) {
 	s := newRelayCircuitState(1)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
-	if _, ok := s.replayWindowFor(CircuitID(2)); ok {
+	if _, ok := s.replayWindowFor(testCircuitID(2)); ok {
 		t.Fatal("replayWindowFor(2) ok = true, want false (table at capacity)")
 	}
 }
 
 func TestRelayCircuitStateExpireStaleFreesCapacity(t *testing.T) {
 	s := newRelayCircuitState(1)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
 	time.Sleep(5 * time.Millisecond)
@@ -53,7 +53,7 @@ func TestRelayCircuitStateExpireStaleFreesCapacity(t *testing.T) {
 	if n := s.expireStale(time.Millisecond); n != 1 {
 		t.Fatalf("expireStale removed %d, want 1", n)
 	}
-	if _, ok := s.replayWindowFor(CircuitID(2)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(2)); !ok {
 		t.Fatal("replayWindowFor(2) after expireStale ok = false, want true (capacity freed)")
 	}
 }

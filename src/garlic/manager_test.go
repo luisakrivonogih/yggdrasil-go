@@ -17,7 +17,7 @@ func TestBuildCircuitDataMessageAppliesRandomPadding(t *testing.T) {
 
 	sizes := map[int]bool{}
 	for range 20 {
-		msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
+		msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
 		if err != nil {
 			t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 		}
@@ -37,7 +37,7 @@ func TestBuildCircuitDataMessageWithinConfiguredRange(t *testing.T) {
 		t.Fatalf("GenerateKeypair returned error: %v", err)
 	}
 
-	msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
+	msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
 	if err != nil {
 		t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestBuildCircuitDataMessageSkipsPaddingWhenDisabled(t *testing.T) {
 		t.Fatalf("GenerateKeypair returned error: %v", err)
 	}
 
-	msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
+	msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
 	if err != nil {
 		t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuildCircuitDataMessageRoundTripsOnion(t *testing.T) {
 	}
 	onion := []byte("onion ciphertext bytes")
 
-	msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(42), 7, 999, onion, cfg)
+	msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(42), 7, 999, onion, cfg)
 	if err != nil {
 		t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestBuildCircuitDataMessageRoundTripsOnion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal returned error: %v", err)
 	}
-	if env.CircuitID != 42 || env.PacketCounter != 7 || env.Expiration != 999 {
+	if env.CircuitID != testCircuitID(42) || env.PacketCounter != 7 || env.Expiration != 999 {
 		t.Fatalf("envelope fields = %+v, want CircuitID=42 PacketCounter=7 Expiration=999", env)
 	}
 	if !bytes.Equal(env.Body, onion) {

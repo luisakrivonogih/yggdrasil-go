@@ -40,7 +40,7 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 	}
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     uint64(c.ID),
+		CircuitID:     c.ID,
 		PacketCounter: counter,
 		Expiration:    uint64(time.Now().Add(ttl).Unix()),
 		Body:          onion,

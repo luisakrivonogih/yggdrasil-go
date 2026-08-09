@@ -7,9 +7,11 @@ import (
 )
 
 func TestEnvelopeMarshalUnmarshalRoundTrip(t *testing.T) {
+	var id CircuitID
+	id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7] = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     0x0102030405060708,
+		CircuitID:     id,
 		PacketCounter: 42,
 		Expiration:    1234567890,
 		Body:          []byte("hello garlic"),
@@ -46,7 +48,7 @@ func TestEnvelopeMarshalUnmarshalRoundTrip(t *testing.T) {
 }
 
 func TestEnvelopeMarshalUnmarshalRoundTripEmptyBodyAndPadding(t *testing.T) {
-	env := &Envelope{Version: EnvelopeVersion1, CircuitID: 1, PacketCounter: 1, Expiration: 1}
+	env := &Envelope{Version: EnvelopeVersion1, CircuitID: testCircuitID(1), PacketCounter: 1, Expiration: 1}
 
 	data, err := env.Marshal()
 	if err != nil {
@@ -123,7 +125,7 @@ func TestUnmarshalRejectsPaddingLengthExceedingBuffer(t *testing.T) {
 }
 
 func TestUnmarshalRejectsUnsupportedVersion(t *testing.T) {
-	env := &Envelope{Version: 99, CircuitID: 1, PacketCounter: 1, Expiration: 1}
+	env := &Envelope{Version: 99, CircuitID: testCircuitID(1), PacketCounter: 1, Expiration: 1}
 	data, err := env.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
@@ -287,5 +289,24 @@ func TestEnvelopePadToRandomRangeRejectsInvertedRange(t *testing.T) {
 	env := &Envelope{Version: EnvelopeVersion1}
 	if err := env.PadToRandomRange(2000, 1000); err == nil {
 		t.Fatal("expected error for maxSize < minSize, got nil")
+	}
+}
+
+func TestEnvelopeCircuitIDRoundTripsFull16Bytes(t *testing.T) {
+	var id CircuitID
+	for i := range id {
+		id[i] = byte(i + 1) // every byte position distinct and non-zero
+	}
+	e := &Envelope{Version: EnvelopeVersion1, CircuitID: id, PacketCounter: 1, Expiration: 1}
+	data, err := e.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	got, err := Unmarshal(data)
+	if err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	if got.CircuitID != id {
+		t.Fatalf("CircuitID = %x, want %x (must round-trip all 16 bytes, not the old 8-byte width)", got.CircuitID, id)
 	}
 }

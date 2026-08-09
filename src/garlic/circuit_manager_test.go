@@ -29,7 +29,7 @@ func TestCircuitManagerAddAndGet(t *testing.T) {
 
 func TestCircuitManagerGetMissingReturnsFalse(t *testing.T) {
 	m := NewCircuitManager(testManagerConfig())
-	if _, ok := m.Get(CircuitID(12345)); ok {
+	if _, ok := m.Get(testCircuitID(12345)); ok {
 		t.Error("Get() on unknown ID ok = true, want false")
 	}
 }

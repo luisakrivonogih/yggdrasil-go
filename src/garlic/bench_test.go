@@ -13,7 +13,7 @@ import (
 )
 
 func BenchmarkEnvelopeMarshal(b *testing.B) {
-	env := &Envelope{Version: EnvelopeVersion1, CircuitID: 1, PacketCounter: 1, Expiration: 1, Body: make([]byte, 1200)}
+	env := &Envelope{Version: EnvelopeVersion1, CircuitID: testCircuitID(1), PacketCounter: 1, Expiration: 1, Body: make([]byte, 1200)}
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := env.Marshal(); err != nil {
@@ -23,7 +23,7 @@ func BenchmarkEnvelopeMarshal(b *testing.B) {
 }
 
 func BenchmarkEnvelopeUnmarshal(b *testing.B) {
-	env := &Envelope{Version: EnvelopeVersion1, CircuitID: 1, PacketCounter: 1, Expiration: 1, Body: make([]byte, 1200)}
+	env := &Envelope{Version: EnvelopeVersion1, CircuitID: testCircuitID(1), PacketCounter: 1, Expiration: 1, Body: make([]byte, 1200)}
 	data, err := env.Marshal()
 	if err != nil {
 		b.Fatal(err)

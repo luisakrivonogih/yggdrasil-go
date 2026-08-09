@@ -3,15 +3,15 @@ package garlic
 import "testing"
 
 func TestCircuitPoolNextCircuitRoundRobin(t *testing.T) {
-	p := newCircuitPool([]CircuitID{1, 2, 3})
-	want := []CircuitID{1, 2, 3, 1, 2}
+	p := newCircuitPool([]CircuitID{testCircuitID(1), testCircuitID(2), testCircuitID(3)})
+	want := []CircuitID{testCircuitID(1), testCircuitID(2), testCircuitID(3), testCircuitID(1), testCircuitID(2)}
 	for i, w := range want {
 		got, ok := p.nextCircuit()
 		if !ok {
 			t.Fatalf("call %d: ok = false, want true", i)
 		}
 		if got != w {
-			t.Fatalf("call %d: got %d, want %d", i, got, w)
+			t.Fatalf("call %d: got %x, want %x", i, got, w)
 		}
 	}
 }
@@ -24,7 +24,7 @@ func TestCircuitPoolNextCircuitEmptyPoolReturnsFalse(t *testing.T) {
 }
 
 func TestCircuitPoolAllReturnsEveryCircuit(t *testing.T) {
-	p := newCircuitPool([]CircuitID{5, 6, 7})
+	p := newCircuitPool([]CircuitID{testCircuitID(5), testCircuitID(6), testCircuitID(7)})
 	all := p.all()
 	if len(all) != 3 {
 		t.Fatalf("all() returned %d circuits, want 3", len(all))
@@ -32,11 +32,11 @@ func TestCircuitPoolAllReturnsEveryCircuit(t *testing.T) {
 }
 
 func TestCircuitPoolAllReturnsDefensiveCopy(t *testing.T) {
-	p := newCircuitPool([]CircuitID{1, 2})
+	p := newCircuitPool([]CircuitID{testCircuitID(1), testCircuitID(2)})
 	all := p.all()
-	all[0] = 999
+	all[0] = testCircuitID(999)
 	again := p.all()
-	if again[0] == 999 {
+	if again[0] == testCircuitID(999) {
 		t.Fatal("mutating all()'s result affected the pool's internal state")
 	}
 }
