@@ -80,9 +80,6 @@ func FuzzProcessCircuitData(f *testing.F) {
 	})
 }
 
-// buildTestCircuitDataForFuzz is a minimal standalone variant of
-// buildTestCircuitData (relay_logic_test.go) that doesn't depend on
-// *testing.T, since Fuzz seed setup runs outside a single subtest.
 func FuzzLayerPlaintextUnmarshal(f *testing.F) {
 	valid := &LayerPlaintext{
 		NextHop:          []byte("next-hop-key"),
@@ -119,6 +116,9 @@ func FuzzServiceDescriptorFieldsUnmarshal(f *testing.F) {
 	})
 }
 
+// buildTestCircuitDataForFuzz is a minimal standalone variant of
+// buildTestCircuitData (relay_logic_test.go) that doesn't depend on
+// *testing.T, since Fuzz seed setup runs outside a single subtest.
 func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration) ([]byte, error) {
 	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
 	if err != nil {
