@@ -198,6 +198,38 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 				"relayedCircuits":    stats.RelayedCircuits,
 			}, nil
 		})
+
+	_ = a.AddHandler("getGarlicKnownPeers", "List Garlic peers this node knows about (direct or via gossip)", []string{},
+		func(in json.RawMessage) (interface{}, error) {
+			peers := g.KnownPeers()
+			out := make([]map[string]string, len(peers))
+			for i, p := range peers {
+				out[i] = map[string]string{
+					"nodeKey":         hex.EncodeToString(p.NodeKey),
+					"garlicPublicKey": hex.EncodeToString(p.GarlicPublicKey),
+					"lastSeen":        p.LastSeen.UTC().Format(time.RFC3339),
+				}
+			}
+			return map[string]interface{}{"peers": out}, nil
+		})
+
+	_ = a.AddHandler("garlicGossip", "Send this node's known-peer sample to an already-verified peer", []string{"key"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			key, err := hex.DecodeString(req.Key)
+			if err != nil {
+				return nil, fmt.Errorf("invalid key: %w", err)
+			}
+			if err := g.GossipAnnounce(key); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{}, nil
+		})
 }
 
 // parseSecondsOrDefault parses s as a floating-point number of seconds,

@@ -23,6 +23,7 @@ const (
 	msgTypeCapabilityRequest byte = iota + 1
 	msgTypeCapabilityResponse
 	msgTypeCircuitData
+	msgTypeAnnounce
 )
 
 // circuitDataMinSize is the minimum length of a circuitData message body
@@ -127,6 +128,27 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	forwardMsg = append(forwardMsg, nextBytes...)
 
 	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
+}
+
+// processAnnounce parses body and records every valid peer entry into
+// this node's discovery registry, seeding future circuit-hop candidates
+// this node has never directly queried. It performs no network I/O.
+// Malformed input, or an entry with an empty key, is silently skipped -
+// there is no response to send on an unauthenticated gossip channel (see
+// docs/garlic-architecture.md §17), and this is best-effort discovery,
+// not a trust decision (every candidate is still capability-verified
+// before it's ever used as a circuit hop).
+func (g *Garlic) processAnnounce(body []byte) {
+	msg, err := UnmarshalAnnounceMessage(body)
+	if err != nil {
+		return
+	}
+	for _, p := range msg.Peers {
+		if len(p.NodeKey) == 0 || len(p.GarlicPublicKey) == 0 {
+			continue
+		}
+		g.discovery.record(DiscoveredPeer{NodeKey: p.NodeKey, GarlicPublicKey: p.GarlicPublicKey})
+	}
 }
 
 // processCapabilityRequest returns the marshaled CapabilityMessage this

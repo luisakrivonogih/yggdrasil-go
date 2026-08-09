@@ -68,6 +68,17 @@ type Config struct {
 	MinJitter       time.Duration
 	MaxJitter       time.Duration
 	JitterQueueSize int
+
+	// Discovery: gossip of known Garlic-capable peers, entirely over the
+	// existing typeSessionGarlic channel (see discovery.go's doc
+	// comment for why this can't be seen by non-Garlic parties).
+	// MaxDiscoveredPeers bounds the local registry; GossipInterval and
+	// GossipFanout control how often, and to how many already-verified
+	// peers, this node proactively shares a sample of what it knows.
+	MaxDiscoveredPeers int
+	GossipInterval     time.Duration
+	GossipFanout       int
+	GossipSampleSize   int
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -93,6 +104,10 @@ func DefaultConfig() Config {
 		MinJitter:            0,
 		MaxJitter:            75 * time.Millisecond,
 		JitterQueueSize:      1024,
+		MaxDiscoveredPeers:   1024,
+		GossipInterval:       30 * time.Second,
+		GossipFanout:         2,
+		GossipSampleSize:     16,
 	}
 }
 
@@ -128,6 +143,7 @@ type Garlic struct {
 	limiter    *RateLimiter
 	rendezvous Rendezvous
 	scheduler  *jitterScheduler
+	discovery  *discoveryRegistry
 
 	delivered chan DeliveredMessage
 
@@ -153,6 +169,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		relayState:      newRelayCircuitState(cfg.MaxRelayCircuits),
 		limiter:         NewRateLimiter(cfg.RatePerSecond, cfg.RateBurst, cfg.MaxTrackedPeers),
 		rendezvous:      rendezvous,
+		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers),
 		delivered:       make(chan DeliveredMessage, 256),
 		capabilityCache: make(map[string]*CapabilityMessage),
 		pending:         make(map[string]chan *CapabilityMessage),
@@ -197,16 +214,75 @@ func (g *Garlic) sendCircuitData(msg []byte, addr net.Addr) {
 func (g *Garlic) cleanupLoop() {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
+	gossip := time.NewTicker(max(g.cfg.GossipInterval, time.Second))
+	defer gossip.Stop()
 	for {
 		select {
 		case <-t.C:
 			g.circuits.ExpireStale()
 			g.relayState.expireStale(2 * g.cfg.CircuitLifetime)
 			g.limiter.Cleanup(time.Hour)
+		case <-gossip.C:
+			g.gossipTick()
 		case <-g.stop:
 			return
 		}
 	}
+}
+
+// gossipTick sends this node's known-peer sample to a few
+// already-capability-verified peers (from capabilityCache, i.e. peers
+// this node has itself confirmed answer garlic-v1 - never an unverified
+// discovery candidate), so discovery propagates without needing a
+// distributed directory.
+func (g *Garlic) gossipTick() {
+	g.mu.Lock()
+	targets := make([]string, 0, len(g.capabilityCache))
+	for key := range g.capabilityCache {
+		targets = append(targets, key)
+	}
+	g.mu.Unlock()
+
+	if len(targets) > g.cfg.GossipFanout {
+		targets = targets[:g.cfg.GossipFanout]
+	}
+	for _, hexKey := range targets {
+		peerKey, err := hex.DecodeString(hexKey)
+		if err != nil {
+			continue
+		}
+		_ = g.GossipAnnounce(peerKey)
+	}
+}
+
+// GossipAnnounce sends to as a sample of this node's known Garlic peers
+// (Config.GossipSampleSize of them), so it can discover peers it hasn't
+// directly queried itself. Intended to be called with an already
+// capability-verified peer, though nothing technically prevents calling
+// it otherwise - an unverified recipient simply can't parse the message
+// if it isn't running src/garlic, same as any other Garlic message type.
+func (g *Garlic) GossipAnnounce(to ed25519.PublicKey) error {
+	sample := g.discovery.sample(g.cfg.GossipSampleSize)
+	peers := make([]AnnouncePeer, len(sample))
+	for i, p := range sample {
+		peers[i] = AnnouncePeer{NodeKey: p.NodeKey, GarlicPublicKey: p.GarlicPublicKey}
+	}
+	body, err := (&AnnounceMessage{Peers: peers}).Marshal()
+	if err != nil {
+		return err
+	}
+	msg := append([]byte{msgTypeAnnounce}, body...)
+	_, err = g.core.WriteGarlic(msg, iwt.Addr(to))
+	return err
+}
+
+// KnownPeers returns every Garlic peer this node currently knows about,
+// whether learned directly (a successful capability query) or via
+// gossip from another peer (msgTypeAnnounce) - candidates for circuit
+// hop selection, not yet capability-verified by this node itself unless
+// QueryCapability has also been called for that specific key.
+func (g *Garlic) KnownPeers() []DiscoveredPeer {
+	return g.discovery.list()
 }
 
 // Identity returns this node's long-term Garlic identity.
@@ -241,6 +317,8 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 		case actionForward:
 			g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
 		}
+	case msgTypeAnnounce:
+		g.processAnnounce(data[1:])
 	}
 }
 
@@ -255,6 +333,13 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 	g.capabilityCache[key] = msg
 	ch := g.pending[key]
 	g.mu.Unlock()
+
+	// A successful, self-reported garlic-v1 response is exactly the
+	// verification discovery candidates need before they're worth
+	// remembering - see discovery.go's doc comment.
+	if msg.SupportsGarlicV1() && len(msg.PublicKey) > 0 {
+		g.discovery.record(DiscoveredPeer{NodeKey: append([]byte(nil), from...), GarlicPublicKey: msg.PublicKey})
+	}
 
 	if ch != nil {
 		select {

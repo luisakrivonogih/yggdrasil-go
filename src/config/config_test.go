@@ -49,6 +49,9 @@ func TestGarlicConfigPaddingAndJitterDefaults(t *testing.T) {
 	if cfg.Garlic.Jitter.MaxDelay == "" {
 		t.Error("Garlic.Jitter.MaxDelay is empty by default")
 	}
+	if cfg.Garlic.MaxDiscoveredPeers <= 0 {
+		t.Error("Garlic.MaxDiscoveredPeers <= 0 by default, want a positive bound")
+	}
 }
 
 // A config file written before the Garlic block existed must keep

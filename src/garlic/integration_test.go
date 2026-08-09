@@ -199,3 +199,76 @@ func TestIntegrationSendGarlicThroughLegacyRelay(t *testing.T) {
 		t.Errorf("B's RelayedCircuits = %d, want 1 (B still runs relay-side replay bookkeeping as the terminal hop)", statsB.RelayedCircuits)
 	}
 }
+
+// TestIntegrationGossipDiscoversUnknownPeer proves discovery propagation
+// end to end against a real mesh: A only ever talks directly to B, and B
+// only ever talks directly to C - A never queries C's capability itself
+// - yet after B gossips its known peers to A, A learns about C purely
+// from that announce message.
+func TestIntegrationGossipDiscoversUnknownPeer(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	nodeC := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB, nodeC}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all) // A -- B -- C
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	idC, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (C) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gC := garlic.New(nodeC, idC, cfg, garlic.NewStaticRendezvous())
+	defer gC.Close()
+
+	// A learns about B directly; B learns about C directly. A never
+	// queries C.
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+	waitForCapability(t, gB, nodeC.PublicKey(), 60*time.Second)
+
+	for _, p := range gA.KnownPeers() {
+		if bytes.Equal(p.NodeKey, nodeC.PublicKey()) {
+			t.Fatal("A already knows about C before any gossip happened - test setup is invalid")
+		}
+	}
+
+	if err := gB.GossipAnnounce(nodeA.PublicKey()); err != nil {
+		t.Fatalf("GossipAnnounce returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeC.PublicKey()) && bytes.Equal(p.GarlicPublicKey, idC.PublicKey) {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A never learned about C via gossip within the deadline; known peers: %+v", gA.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

@@ -326,6 +326,7 @@ func main() {
 			if gcfg.MaxJitter, err = time.ParseDuration(cfg.Garlic.Jitter.MaxDelay); err != nil {
 				panic(fmt.Sprintf("invalid Garlic.Jitter.MaxDelay %q: %v", cfg.Garlic.Jitter.MaxDelay, err))
 			}
+			gcfg.MaxDiscoveredPeers = cfg.Garlic.MaxDiscoveredPeers
 			n.garlic = garlic.New(n.core, identity, gcfg, garlic.NewStaticRendezvous())
 			logger.Printf("Your Garlic public key is %s", hex.EncodeToString(identity.PublicKey))
 			if n.admin != nil {

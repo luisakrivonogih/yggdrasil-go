@@ -69,6 +69,7 @@ func newTestGarlic(t *testing.T) *Garlic {
 		cfg:        DefaultConfig(),
 		relayState: newRelayCircuitState(1024),
 		delivered:  make(chan DeliveredMessage, 256),
+		discovery:  newDiscoveryRegistry(1024),
 	}
 }
 
@@ -266,6 +267,48 @@ func TestProcessCircuitDataDropsWhenRelayTableFull(t *testing.T) {
 	action := g.processCircuitData(msg)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (relay circuit table full)", action.kind)
+	}
+}
+
+func TestProcessAnnounceRecordsPeers(t *testing.T) {
+	g := newTestGarlic(t)
+	msg := &AnnounceMessage{Peers: []AnnouncePeer{
+		{NodeKey: []byte("node-a"), GarlicPublicKey: []byte("garlic-a")},
+		{NodeKey: []byte("node-b"), GarlicPublicKey: []byte("garlic-b")},
+	}}
+	body, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+
+	g.processAnnounce(body)
+
+	peers := g.discovery.list()
+	if len(peers) != 2 {
+		t.Fatalf("discovery registry has %d peers, want 2", len(peers))
+	}
+}
+
+func TestProcessAnnounceIgnoresMalformedInput(t *testing.T) {
+	g := newTestGarlic(t)
+	g.processAnnounce([]byte{0xFF, 0xFF}) // must not panic
+	if len(g.discovery.list()) != 0 {
+		t.Fatalf("discovery registry has %d peers, want 0 for malformed input", len(g.discovery.list()))
+	}
+}
+
+func TestProcessAnnounceSkipsEmptyKeyEntries(t *testing.T) {
+	g := newTestGarlic(t)
+	msg := &AnnounceMessage{Peers: []AnnouncePeer{{NodeKey: nil, GarlicPublicKey: []byte("g")}}}
+	body, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+
+	g.processAnnounce(body)
+
+	if len(g.discovery.list()) != 0 {
+		t.Fatalf("discovery registry has %d peers, want 0 (entry with empty NodeKey must be skipped)", len(g.discovery.list()))
 	}
 }
 
