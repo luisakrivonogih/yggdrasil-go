@@ -497,7 +497,7 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 		if err != nil {
 			return CircuitID{}, err
 		}
-		key, err := DeriveKey(secret, nil, LabelLayerKey)
+		key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
 		if err != nil {
 			return CircuitID{}, err
 		}

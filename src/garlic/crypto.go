@@ -35,13 +35,15 @@ import (
 // produced by DeriveKey.
 const KeySize = chacha20poly1305.KeySize
 
-// Domain-separation labels for HKDF-derived keys. Each distinct key
-// purpose must use a distinct label, so that keys derived from the same
-// underlying secret (e.g. the same ECDH output) for different purposes
-// remain cryptographically independent.
+// Domain-separation labels for HKDF-derived keys, under the garlic-v2
+// wire format (see CapabilityGarlicV2). LabelCircuitDataRecv is reserved
+// but unused until a reply/return path exists - see deriveLayerKey's
+// doc comment for why establish/data are two chained stages rather than
+// two labels on the same derivation.
 const (
-	LabelLayerKey   = "yggdrasil-garlic-v1-layer-key"
-	LabelCircuitKey = "yggdrasil-garlic-v1-circuit-key"
+	LabelCircuitEstablish = "yggdrasil-garlic-v2-circuit-establish"
+	LabelCircuitDataSend  = "yggdrasil-garlic-v2-circuit-data-send"
+	LabelCircuitDataRecv  = "yggdrasil-garlic-v2-circuit-data-recv"
 )
 
 var (
@@ -139,4 +141,25 @@ func DerivePublicKey(privateKey []byte) ([]byte, error) {
 // appropriate domain-separation label first.
 func ECDH(privateKey, publicKey []byte) ([]byte, error) {
 	return curve25519.X25519(privateKey, publicKey)
+}
+
+// deriveLayerKey derives a per-hop layer encryption key from a raw ECDH
+// output in two HKDF stages: first into a circuit-establishment secret,
+// then from that into the forward-direction circuit-data key. The
+// protocol is fully non-interactive (there is no separate handshake
+// message distinct from data packets), so "circuit establishment" and
+// "circuit data" are modeled as two stages of one chain rather than two
+// wire phases that don't actually exist - this still gives real,
+// checkable domain separation: the establishment secret and the data
+// key are cryptographically distinct values, not just different labels
+// applied to the same input. Chaining through LabelCircuitEstablish also
+// means a future reply path, keying off LabelCircuitDataRecv from the
+// same establishment secret, is structurally unable to derive the
+// forward-direction key.
+func deriveLayerKey(ecdhSecret []byte) ([]byte, error) {
+	establishSecret, err := DeriveKey(ecdhSecret, nil, LabelCircuitEstablish)
+	if err != nil {
+		return nil, err
+	}
+	return DeriveKey(establishSecret, nil, LabelCircuitDataSend)
 }

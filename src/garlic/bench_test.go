@@ -40,7 +40,7 @@ func BenchmarkDeriveKey(b *testing.B) {
 	secret := make([]byte, 32)
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := DeriveKey(secret, nil, LabelLayerKey); err != nil {
+		if _, err := DeriveKey(secret, nil, LabelCircuitDataSend); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -64,7 +64,7 @@ func BenchmarkECDH(b *testing.B) {
 }
 
 func BenchmarkSeal(b *testing.B) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	plaintext := make([]byte, 1200)
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
@@ -75,7 +75,7 @@ func BenchmarkSeal(b *testing.B) {
 }
 
 func BenchmarkOpen(b *testing.B) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	plaintext := make([]byte, 1200)
 	ciphertext, err := Seal(key, 1, plaintext, nil)
 	if err != nil {
@@ -92,7 +92,7 @@ func BenchmarkOpen(b *testing.B) {
 func BenchmarkBuildOnionThreeHops(b *testing.B) {
 	hops := make([]Hop, 3)
 	for i := range hops {
-		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelLayerKey)
+		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelCircuitDataSend)
 		hops[i] = Hop{NodeKey: []byte{byte(i)}, Key: key}
 	}
 	payload := make([]byte, 1200)
@@ -110,7 +110,7 @@ func BenchmarkBuildOnionThreeHops(b *testing.B) {
 func BenchmarkCircuitSeal(b *testing.B) {
 	hops := make([]Hop, 3)
 	for i := range hops {
-		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelLayerKey)
+		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelCircuitDataSend)
 		hops[i] = Hop{NodeKey: []byte{byte(i)}, Key: key}
 	}
 	c, err := NewCircuit(hops, time.Hour, 1<<40, 1<<50)

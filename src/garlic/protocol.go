@@ -88,7 +88,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	if err != nil {
 		return circuitAction{kind: actionDrop}
 	}
-	key, err := DeriveKey(secret, nil, LabelLayerKey)
+	key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
 	if err != nil {
 		return circuitAction{kind: actionDrop}
 	}

@@ -20,7 +20,7 @@ func testCircuitID(n uint64) CircuitID {
 func testHops(n int) []Hop {
 	hops := make([]Hop, n)
 	for i := range hops {
-		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelLayerKey)
+		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelCircuitDataSend)
 		hops[i] = Hop{
 			NodeKey: []byte{byte('A' + i)},
 			Key:     key,

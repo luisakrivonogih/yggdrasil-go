@@ -6,7 +6,7 @@ import (
 )
 
 func TestEncryptLayerDecryptLayerRoundTripWithNextHop(t *testing.T) {
-	key, _ := DeriveKey([]byte("hop secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("hop secret"), nil, LabelCircuitDataSend)
 	layer := &LayerPlaintext{
 		NextHop: []byte("next-hop-node-key-bytes"),
 		Inner:   []byte("inner ciphertext to forward"),
@@ -29,7 +29,7 @@ func TestEncryptLayerDecryptLayerRoundTripWithNextHop(t *testing.T) {
 }
 
 func TestEncryptLayerDecryptLayerRoundTripTerminal(t *testing.T) {
-	key, _ := DeriveKey([]byte("hop secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("hop secret"), nil, LabelCircuitDataSend)
 	layer := &LayerPlaintext{
 		NextHop: nil,
 		Inner:   []byte("final delivered payload"),
@@ -52,8 +52,8 @@ func TestEncryptLayerDecryptLayerRoundTripTerminal(t *testing.T) {
 }
 
 func TestDecryptLayerRejectsWrongKey(t *testing.T) {
-	keyA, _ := DeriveKey([]byte("secret A"), nil, LabelLayerKey)
-	keyB, _ := DeriveKey([]byte("secret B"), nil, LabelLayerKey)
+	keyA, _ := DeriveKey([]byte("secret A"), nil, LabelCircuitDataSend)
+	keyB, _ := DeriveKey([]byte("secret B"), nil, LabelCircuitDataSend)
 	layer := &LayerPlaintext{Inner: []byte("payload")}
 
 	ct, err := EncryptLayer(keyA, 1, layer)
@@ -66,7 +66,7 @@ func TestDecryptLayerRejectsWrongKey(t *testing.T) {
 }
 
 func TestDecryptLayerRejectsTamperedCiphertext(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	layer := &LayerPlaintext{Inner: []byte("payload")}
 
 	ct, err := EncryptLayer(key, 1, layer)
@@ -81,7 +81,7 @@ func TestDecryptLayerRejectsTamperedCiphertext(t *testing.T) {
 }
 
 func TestDecryptLayerRejectsMalformedPlaintext(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	// A validly-authenticated ciphertext whose plaintext is not a valid
 	// LayerPlaintext encoding (too short to contain the length prefixes).
 	ct, err := Seal(key, 1, []byte{0, 0}, nil)
@@ -95,9 +95,9 @@ func TestDecryptLayerRejectsMalformedPlaintext(t *testing.T) {
 
 func threeTestHops(t *testing.T) []Hop {
 	t.Helper()
-	keyA, _ := DeriveKey([]byte("secret A"), nil, LabelLayerKey)
-	keyB, _ := DeriveKey([]byte("secret B"), nil, LabelLayerKey)
-	keyC, _ := DeriveKey([]byte("secret C"), nil, LabelLayerKey)
+	keyA, _ := DeriveKey([]byte("secret A"), nil, LabelCircuitDataSend)
+	keyB, _ := DeriveKey([]byte("secret B"), nil, LabelCircuitDataSend)
+	keyC, _ := DeriveKey([]byte("secret C"), nil, LabelCircuitDataSend)
 	return []Hop{
 		{NodeKey: []byte("node-A-key"), Key: keyA, Counter: 1},
 		{NodeKey: []byte("node-B-key"), Key: keyB, Counter: 1},
@@ -170,7 +170,7 @@ func TestBuildOnionRejectsEmptyPath(t *testing.T) {
 }
 
 func TestBuildOnionSingleHop(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	hops := []Hop{{NodeKey: []byte("node-A-key"), Key: key, Counter: 1}}
 	payload := []byte("direct payload")
 

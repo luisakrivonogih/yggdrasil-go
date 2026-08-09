@@ -24,7 +24,7 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 		if err != nil {
 			t.Fatalf("ECDH returned error: %v", err)
 		}
-		key, err := DeriveKey(secret, nil, LabelLayerKey)
+		key, err := DeriveKey(secret, nil, LabelCircuitDataSend)
 		if err != nil {
 			t.Fatalf("DeriveKey returned error: %v", err)
 		}
