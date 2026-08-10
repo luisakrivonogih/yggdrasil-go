@@ -153,6 +153,7 @@ type Garlic struct {
 	rendezvous Rendezvous
 	scheduler  *jitterScheduler
 	discovery  *discoveryRegistry
+	security   SecurityCounters
 
 	delivered chan DeliveredMessage
 

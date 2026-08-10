@@ -216,6 +216,9 @@ func TestProcessCircuitDataDropsWrongRecipient(t *testing.T) {
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (message encrypted for a different identity)", action.kind)
 	}
+	if got := g.security.snapshot().AuthFailures; got != 1 {
+		t.Fatalf("security.AuthFailures = %d, want 1", got)
+	}
 }
 
 func TestProcessCircuitDataDropsReplay(t *testing.T) {
@@ -230,6 +233,9 @@ func TestProcessCircuitDataDropsReplay(t *testing.T) {
 	if second.kind != actionDrop {
 		t.Fatalf("second (replayed) action.kind = %v, want actionDrop", second.kind)
 	}
+	if got := g.security.snapshot().ReplayDrops; got != 1 {
+		t.Fatalf("security.ReplayDrops = %d, want 1", got)
+	}
 }
 
 func TestProcessCircuitDataDropsExpired(t *testing.T) {
@@ -240,6 +246,9 @@ func TestProcessCircuitDataDropsExpired(t *testing.T) {
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (expired)", action.kind)
 	}
+	if got := g.security.snapshot().ExpiredPackets; got != 1 {
+		t.Fatalf("security.ExpiredPackets = %d, want 1", got)
+	}
 }
 
 func TestProcessCircuitDataDropsMalformedTooShort(t *testing.T) {
@@ -247,6 +256,9 @@ func TestProcessCircuitDataDropsMalformedTooShort(t *testing.T) {
 	action := g.processCircuitData([]byte{1, 2, 3})
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (too short to contain an ephemeral key)", action.kind)
+	}
+	if got := g.security.snapshot().MalformedPackets; got != 1 {
+		t.Fatalf("security.MalformedPackets = %d, want 1", got)
 	}
 }
 
@@ -256,6 +268,9 @@ func TestProcessCircuitDataDropsMalformedEnvelope(t *testing.T) {
 	action := g.processCircuitData(junk)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (malformed envelope)", action.kind)
+	}
+	if got := g.security.snapshot().MalformedPackets; got != 1 {
+		t.Fatalf("security.MalformedPackets = %d, want 1", got)
 	}
 }
 
@@ -267,6 +282,9 @@ func TestProcessCircuitDataDropsWhenRelayTableFull(t *testing.T) {
 	action := g.processCircuitData(msg)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (relay circuit table full)", action.kind)
+	}
+	if got := g.security.snapshot().RelayTableFull; got != 1 {
+		t.Fatalf("security.RelayTableFull = %d, want 1", got)
 	}
 }
 

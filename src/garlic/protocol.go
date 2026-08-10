@@ -64,32 +64,43 @@ type circuitAction struct {
 // byte). It performs no I/O.
 func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	if len(body) < circuitDataMinSize {
+		g.security.malformedPackets.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 	ephemeralPub := body[:KeySize]
 	env, err := Unmarshal(body[KeySize:])
 	if err != nil {
+		g.security.malformedPackets.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 	if env.Version != EnvelopeVersion1 {
+		g.security.malformedPackets.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 	if time.Now().Unix() > int64(env.Expiration) {
+		g.security.expiredPackets.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 
 	circuitID := CircuitID(env.CircuitID)
 	window, ok := g.relayState.replayWindowFor(circuitID)
-	if !ok || !window.CheckAndSet(env.PacketCounter) {
+	if !ok {
+		g.security.relayTableFull.Add(1)
+		return circuitAction{kind: actionDrop}
+	}
+	if !window.CheckAndSet(env.PacketCounter) {
+		g.security.replayDrops.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 
 	secret, err := ECDH(g.identity.PrivateKey, ephemeralPub)
 	if err != nil {
+		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 	key, err := DeriveKey(secret, nil, LabelLayerKey)
 	if err != nil {
+		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 
@@ -98,6 +109,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 		// Wrong key (message wasn't encrypted for us), tampered
 		// ciphertext, or malformed plaintext all look identical here by
 		// design - see ErrNotForThisIdentity's doc comment.
+		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 
@@ -121,6 +133,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	}
 	nextBytes, err := nextEnv.Marshal()
 	if err != nil {
+		g.security.malformedPackets.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
 	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
