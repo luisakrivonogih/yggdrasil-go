@@ -68,11 +68,28 @@ depends on *how* it would be selected — verified against
 two paths behave differently, and only one of them checks it:
 
 - **Gossip/automatic discovery** (`garlicGossip`, then
-  `SelectPath`/`SelectDiversePath`): enforced. `handleCapabilityResponse`
-  (`src/garlic/manager.go`) calls `SupportsGarlicV2` before recording a
-  peer into the discovery registry these selection functions draw
-  candidates from, so a `garlic-v1`-only peer is never added to that
-  pool in the first place.
+  `SelectPath`/`SelectDiversePath`): **enforced on only one of its two
+  entry points, and not currently load-bearing anyway.**
+  `SupportsGarlicV2` is checked in exactly one of the two places that
+  write into the discovery registry: `handleCapabilityResponse`
+  (`src/garlic/manager.go`) calls it before recording a peer that
+  answered *this* node's own direct capability query. But
+  `processAnnounce` (`src/garlic/protocol.go`) — the receive-side
+  handler for `msgTypeAnnounce` packets, which arrive whenever some peer
+  calls `garlicGossip` pointed at this node (`GossipAnnounce`,
+  `src/garlic/manager.go`) — writes into the same registry with no
+  version check at all, and structurally can't add one: `AnnouncePeer`
+  (`src/garlic/discovery.go`) carries only `NodeKey`/`GarlicPublicKey`,
+  no version field. `processAnnounce`'s own doc comment describes this
+  path as "an unauthenticated gossip channel." So a `garlic-v1`-only
+  peer's key *can* still end up in this node's discovery registry,
+  relayed in secondhand by any peer that already knows it — the
+  registry is not a reliable version filter. Separately, and regardless
+  of the above: `SelectPath`/`SelectDiversePath` (the registry's only
+  consumers) have no in-tree callers outside their own definition and
+  tests — no admin handler or other production code path invokes them
+  — so this discovery → selection pipeline doesn't drive any live
+  circuit construction today, independent of the version-check gap.
 - **Explicit admin-socket usage** (`createGarlicCircuit hops=...`,
   `publishGarlicService introPoints=...`): **not enforced.** Neither
   handler (`src/garlic/admin.go`) calls `SupportsGarlicV2`.
@@ -84,15 +101,17 @@ two paths behave differently, and only one of them checks it:
   handler *will* get a circuit built (or a descriptor published) through
   it.
 
-Nothing here is a two-way-safe negotiation for the explicit-selection
-path: since the wire format genuinely changed (wider `CircuitID`, new
-HKDF labels — `docs/garlic-protocol.md` §4.1), a circuit explicitly
-routed through a `garlic-v1`-only hop fails at the wire-decoding level —
-garbled or rejected packets — rather than being excluded up front by
-capability negotiation. Garlic has no deployed compatibility guarantee
-to preserve across the version bump; the discovery path was written to
-fail closed on a version mismatch, but the explicit-selection admin
-handlers trust the caller's own choice of hop instead.
+Nothing here is a two-way-safe negotiation: since the wire format
+genuinely changed (wider `CircuitID`, new HKDF labels —
+`docs/garlic-protocol.md` §4.1), a circuit routed through a
+`garlic-v1`-only hop fails at the wire-decoding level — garbled or
+rejected packets — rather than being excluded up front by capability
+negotiation. Garlic has no deployed compatibility guarantee to preserve
+across the version bump, and neither path above is an airtight
+version-mismatch guard in practice: gossip discovery filters direct
+capability responses but not relayed announcements (and doesn't
+currently feed any live circuit-construction path regardless), and the
+admin-socket paths perform no version check at all.
 
 ## The nuance the original request's diagrams don't quite capture
 
