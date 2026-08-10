@@ -1,8 +1,18 @@
 # yggdashboard — design spec
 
-Status: approved, not yet implemented. Companion to the Garlic Routing
-Overlay work (`docs/garlic-*.md`) but independent of it - this dashboard
-shows any Yggdrasil node's state, Garlic-specific panels are additive.
+Status: superseded by
+`docs/superpowers/specs/2026-08-10-yggdashboard-v2-design.md` (2026-08-10)
+- kept for history. Its Phase 1 was fully implemented in an isolated,
+never-merged git worktree (`.claude/worktrees/yggdashboard-phase1`,
+branch `worktree-yggdashboard-phase1`); the v2 spec supersedes this
+document's architecture (WebSocket push, single page, standalone Node
+process, env-var config) with polling, multiple routed pages, a
+yggdrasil-spawned process, and HJSON node-config integration, while
+salvaging the old worktree's tested, architecture-agnostic protocol-level
+code (JSON stream extractor, admin-socket client framing) where it still
+fits. Companion to the Garlic Routing Overlay work (`docs/garlic-*.md`)
+but independent of it - this dashboard shows any Yggdrasil node's state,
+Garlic-specific panels are additive.
 
 ## Problem
 
