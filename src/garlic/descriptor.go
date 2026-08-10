@@ -35,6 +35,7 @@ var (
 	ErrInvalidDescriptorSignature   = errors.New("garlic: service descriptor signature invalid")
 	ErrDescriptorGIDMismatch        = errors.New("garlic: service descriptor does not match requested GID")
 	ErrDescriptorExpired            = errors.New("garlic: service descriptor expired")
+	ErrDescriptorNotYetValid        = errors.New("garlic: service descriptor published in the future")
 	ErrDescriptorTruncated          = errors.New("garlic: service descriptor truncated")
 )
 
@@ -176,10 +177,20 @@ func SignServiceDescriptor(signingPublicKey ed25519.PublicKey, signingPrivateKey
 }
 
 // VerifyServiceDescriptor checks that d is a validly-signed descriptor
-// for gid, not expired as of now. This is the client-side trust
-// boundary: Rendezvous.Lookup returns d unverified (the rendezvous is
-// untrusted), and every caller of Lookup must run the result through
-// this before trusting d.IntroPoints.
+// for gid, with a lifetime within MaxDescriptorLifetime, published no
+// later than now, and not expired as of now. This is the client-side
+// trust boundary: Rendezvous.Lookup returns d unverified (the
+// rendezvous is untrusted), and every caller of Lookup must run the
+// result through this before trusting d.IntroPoints.
+//
+// The lifetime check is enforced here, not just in the
+// SignServiceDescriptor convenience constructor, because
+// SignServiceDescriptor is not the only way to produce a
+// *ServiceDescriptor: a service holding its own signing key could build
+// one directly and call ed25519.Sign on it, bypassing
+// SignServiceDescriptor's cap entirely. Checking here is what actually
+// stops a self-signed, unreasonably-long-lived descriptor from being
+// trusted.
 func VerifyServiceDescriptor(d *ServiceDescriptor, gid GID, now uint64) error {
 	if d.Version != ServiceDescriptorVersion1 {
 		return ErrUnsupportedDescriptorVersion
@@ -193,6 +204,12 @@ func VerifyServiceDescriptor(d *ServiceDescriptor, gid GID, now uint64) error {
 	}
 	if !ed25519.Verify(d.ServicePublicKey, toVerify, d.Signature) {
 		return ErrInvalidDescriptorSignature
+	}
+	if d.ExpiresAt < d.PublishedAt || d.ExpiresAt-d.PublishedAt > MaxDescriptorLifetime {
+		return ErrDescriptorLifetimeTooLong
+	}
+	if d.PublishedAt > now {
+		return ErrDescriptorNotYetValid
 	}
 	if now > d.ExpiresAt {
 		return ErrDescriptorExpired

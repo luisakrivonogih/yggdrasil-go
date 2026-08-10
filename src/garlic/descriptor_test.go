@@ -2,6 +2,8 @@ package garlic
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"errors"
 	"testing"
 )
 
@@ -109,6 +111,51 @@ func TestVerifyServiceDescriptorRejectsWrongGID(t *testing.T) {
 
 	if err := VerifyServiceDescriptor(d, wrongGID, 1500); err == nil {
 		t.Fatal("expected error verifying a valid descriptor against an unrelated GID, got nil")
+	}
+}
+
+// TestVerifyServiceDescriptorRejectsExcessiveLifetimeBypassingSign proves
+// the lifetime cap holds even when SignServiceDescriptor's own check is
+// bypassed - built by hand and signed directly with ed25519.Sign, the
+// way a service holding its own signing key could construct a
+// ServiceDescriptor without going through SignServiceDescriptor at all.
+func TestVerifyServiceDescriptorRejectsExcessiveLifetimeBypassingSign(t *testing.T) {
+	id := testDescriptorIdentity(t)
+	serviceID := []byte("svc")
+	d := &ServiceDescriptor{
+		Version:          ServiceDescriptorVersion1,
+		ServicePublicKey: id.SigningPublicKey,
+		ServiceID:        serviceID,
+		PublishedAt:      1000,
+		ExpiresAt:        1000 + MaxDescriptorLifetime + 1,
+	}
+	toSign, err := d.signedBytes()
+	if err != nil {
+		t.Fatalf("signedBytes returned error: %v", err)
+	}
+	d.Signature = ed25519.Sign(id.SigningPrivateKey, toSign)
+	gid := ComputeGID(id.SigningPublicKey, serviceID)
+
+	err = VerifyServiceDescriptor(d, gid, 1500)
+	if !errors.Is(err, ErrDescriptorLifetimeTooLong) {
+		t.Fatalf("VerifyServiceDescriptor error = %v, want ErrDescriptorLifetimeTooLong", err)
+	}
+}
+
+func TestVerifyServiceDescriptorRejectsFuturePublishedAt(t *testing.T) {
+	id := testDescriptorIdentity(t)
+	serviceID := []byte("svc")
+	d, err := SignServiceDescriptor(id.SigningPublicKey, id.SigningPrivateKey, serviceID, nil, 2000, 3000)
+	if err != nil {
+		t.Fatalf("SignServiceDescriptor returned error: %v", err)
+	}
+	gid := ComputeGID(id.SigningPublicKey, serviceID)
+
+	// now (1500) is before PublishedAt (2000): the descriptor claims to
+	// have been published in the future.
+	err = VerifyServiceDescriptor(d, gid, 1500)
+	if !errors.Is(err, ErrDescriptorNotYetValid) {
+		t.Fatalf("VerifyServiceDescriptor error = %v, want ErrDescriptorNotYetValid", err)
 	}
 }
 
