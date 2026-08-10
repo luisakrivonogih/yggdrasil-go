@@ -57,3 +57,66 @@ func TestRelayCircuitStateExpireStaleFreesCapacity(t *testing.T) {
 		t.Fatal("replayWindowFor(2) after expireStale ok = false, want true (capacity freed)")
 	}
 }
+
+func TestRelayCircuitStateRecordForwardTracksHopsAndTraffic(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+		t.Fatal("replayWindowFor(1) ok = false, want true")
+	}
+	s.recordForward(CircuitID(1), []byte("prev-hop"), []byte("next-hop"), 100)
+	s.recordForward(CircuitID(1), []byte("prev-hop"), []byte("next-hop"), 50)
+
+	snap := s.snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot() returned %d entries, want 1", len(snap))
+	}
+	info := snap[0]
+	if info.ID != CircuitID(1) {
+		t.Fatalf("info.ID = %d, want 1", info.ID)
+	}
+	if string(info.PreviousHop) != "prev-hop" || string(info.NextHop) != "next-hop" {
+		t.Fatalf("info.PreviousHop, NextHop = %q, %q, want \"prev-hop\", \"next-hop\"", info.PreviousHop, info.NextHop)
+	}
+	if info.PacketsRelayed != 2 {
+		t.Fatalf("info.PacketsRelayed = %d, want 2", info.PacketsRelayed)
+	}
+	if info.BytesRelayed != 150 {
+		t.Fatalf("info.BytesRelayed = %d, want 150", info.BytesRelayed)
+	}
+	if info.FirstSeen.IsZero() || info.LastActive.IsZero() {
+		t.Fatal("FirstSeen/LastActive must be set")
+	}
+	if info.LastActive.Before(info.FirstSeen) {
+		t.Fatal("LastActive must not be before FirstSeen")
+	}
+}
+
+func TestRelayCircuitStateRecordForwardIsNoOpForUntrackedCircuit(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	// No replayWindowFor call first - this circuit was never admitted.
+	s.recordForward(CircuitID(99), []byte("prev"), []byte("next"), 10)
+	if snap := s.snapshot(); len(snap) != 0 {
+		t.Fatalf("snapshot() = %+v, want empty (recordForward must not create untracked circuits)", snap)
+	}
+}
+
+func TestRelayCircuitStateSnapshotEmptyInitially(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	if snap := s.snapshot(); len(snap) != 0 {
+		t.Fatalf("snapshot() = %+v, want empty", snap)
+	}
+}
+
+func TestRelayCircuitStateSnapshotOmitsExpiredEntries(t *testing.T) {
+	s := newRelayCircuitState(1)
+	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+		t.Fatal("replayWindowFor(1) ok = false, want true")
+	}
+	s.recordForward(CircuitID(1), []byte("prev"), []byte("next"), 10)
+	time.Sleep(5 * time.Millisecond)
+	s.expireStale(time.Millisecond)
+
+	if snap := s.snapshot(); len(snap) != 0 {
+		t.Fatalf("snapshot() after expireStale = %+v, want empty", snap)
+	}
+}

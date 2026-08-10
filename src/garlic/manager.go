@@ -356,19 +356,22 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 	case msgTypeCapabilityResponse:
 		g.handleCapabilityResponse(from, data[1:])
 	case msgTypeCircuitData:
-		g.dispatchAction(g.processCircuitData(data[1:]))
+		g.dispatchAction(g.processCircuitData(data[1:]), from)
 	case msgTypeAnnounce:
 		g.processAnnounce(data[1:])
 	case msgTypeCircuitDataBundle:
 		for _, action := range g.processCircuitDataBundle(data[1:]) {
-			g.dispatchAction(action)
+			g.dispatchAction(action, from)
 		}
 	}
 }
 
 // dispatchAction carries out a single circuitAction: deliver locally, or
-// forward to the next hop. actionDrop is a no-op (nothing to do).
-func (g *Garlic) dispatchAction(action circuitAction) {
+// forward to the next hop. actionDrop is a no-op (nothing to do). from
+// is the peer this data arrived from - recorded as the relayed
+// circuit's previous hop when forwarding, never used or stored for any
+// other action kind.
+func (g *Garlic) dispatchAction(action circuitAction, from ed25519.PublicKey) {
 	switch action.kind {
 	case actionDeliver:
 		select {
@@ -376,8 +379,17 @@ func (g *Garlic) dispatchAction(action circuitAction) {
 		default:
 		}
 	case actionForward:
+		g.relayState.recordForward(action.circuitID, from, action.forwardTo, len(action.forwardMsg))
 		g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
 	}
+}
+
+// RelayCircuits returns a snapshot of every circuit this node is
+// currently relaying (i.e. is an intermediate hop for) - real, locally
+// known previous/next hop and traffic data, never a fabricated full
+// path. Used by the getGarlicCircuits admin handler.
+func (g *Garlic) RelayCircuits() []RelayCircuitInfo {
+	return g.relayState.snapshot()
 }
 
 func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
