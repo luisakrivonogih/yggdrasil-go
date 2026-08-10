@@ -12,7 +12,7 @@ useful to the next person hardening this code, not to reassure.
 | Operation | Primitive | Notes |
 |---|---|---|
 | Key agreement | X25519 (`golang.org/x/crypto/curve25519`) | `ECDH`, `crypto.go` |
-| Key derivation | HKDF-SHA256 (`golang.org/x/crypto/hkdf`) | `DeriveKey`, explicit domain-separation label per purpose (`LabelLayerKey`, `LabelCircuitKey` — the latter currently unused, reserved) |
+| Key derivation | HKDF-SHA256 (`golang.org/x/crypto/hkdf`) | `DeriveKey`, two-stage chain with an explicit domain-separation label per stage: the raw per-hop ECDH output is first specialized via `LabelCircuitEstablish`, then the packet key is derived from *that* via `LabelCircuitDataSend`. `LabelCircuitDataRecv` is a third label, reserved but unwired until a reply path exists, so a future return direction structurally cannot derive the same key material as the forward direction. (The original `LabelLayerKey`/`LabelCircuitKey` pair this row used to describe was removed in the crypto-hardening pass in favor of this chain.) |
 | Authenticated encryption | XChaCha20-Poly1305 (`golang.org/x/crypto/chacha20poly1305`) | `Seal`/`Open`, 24-byte nonce |
 | Nonce generation | Deterministic from caller-supplied counter | Right-aligned into a zero-padded 24-byte buffer (`nonceFromCounter`) |
 | Service identifier hash | BLAKE2b-256 (`golang.org/x/crypto/blake2b`) | `ComputeGID`, with domain separator |
@@ -30,16 +30,38 @@ encryption anywhere in this package — every ciphertext produced by
   identity** (`docs/garlic-architecture.md` §1.1) — an X25519 keypair,
   never derived from the node's ed25519 key. Compromise of one doesn't
   reveal the other.
-- **Capability responses correlate a node key to "runs Garlic-v1" and to
+
+  **Update:** the `Identity` also now carries a second, independently
+  generated Ed25519 keypair (`SigningPublicKey`/`SigningPrivateKey`,
+  `src/garlic/identity.go`), used only for service-descriptor signing
+  (below) — generated fresh alongside the X25519 circuit-ECDH keypair,
+  never derived from it or from the Yggdrasil node identity, per the
+  same "no ad-hoc X25519-from-Ed25519 derivation" constraint as the
+  original bullet above. Compromising any one of the three identities
+  (Yggdrasil node key, Garlic X25519 key, Garlic signing key) does not
+  reveal the other two.
+- **Capability responses correlate a node key to "runs Garlic-v2" and to
   a specific Garlic public key.** This is an intentional, necessary
   disclosure (you can't select a hop you can't verify), but it does mean
   a passive-ish observer who can send capability requests (anyone) can
   build a map of which Yggdrasil node keys are Garlic-capable and what
   their Garlic public keys are. Not mitigated, and not mitigable without
   removing the capability-response feature itself.
-- **Ephemeral-key reuse across a circuit's hops** (flagged in
-  `docs/garlic-threat-model.md` under "malicious relay") is the concrete
-  identity/circuit-correlation weakness in this version.
+- **Fixed — per-hop ephemeral keys.** The circuit originator now
+  generates an independent ephemeral X25519 keypair per hop rather than
+  reusing one for every hop's ECDH; a hop only learns the next hop's
+  ephemeral public key by successfully decrypting its own layer
+  (`src/garlic/manager.go`'s `CreateCircuit`, `docs/garlic-protocol.md`
+  §4.1). This closes the ephemeral-key-reuse linkability weakness this
+  bullet used to flag — see `docs/garlic-threat-model.md`'s "Malicious
+  relay" section for the exact property proven
+  (`TestNonAdjacentHopsCannotLinkViaEphemeralKeys`) and its residual
+  scope: `CircuitID`/`PacketCounter`/`Expiration` still travel outside
+  the AEAD-encrypted layer and are copied verbatim hop-to-hop, so
+  colluding non-adjacent relays can still confirm they're on the same
+  circuit by comparing those three fields even though they now share no
+  ephemeral key. That residual is unaddressed by this pass and is a
+  concrete item for a future one.
 
 ## IP / address leakage
 
@@ -156,17 +178,25 @@ passed through `DeriveKey` before any encryption happens.
 
 ## Forward secrecy
 
-**Partial, not complete.** Per-circuit ephemeral keys mean compromising
-one circuit's derived keys doesn't expose other circuits (past or
-future) between the same two identities — this is real forward secrecy
-at the circuit granularity. However, compromising a hop's **long-term**
-Garlic private key retroactively allows recomputing every past circuit's
+**Partial, not complete.** Per-hop ephemeral keys (one independent
+X25519 keypair per hop, not one shared across the whole circuit — see
+"Identity correlation" above) mean compromising one circuit's derived
+keys doesn't expose other circuits (past or future) between the same two
+identities, and non-adjacent hops within the same circuit share no
+ephemeral key material either — this is real forward secrecy at both the
+circuit and hop granularity. However, compromising a hop's **long-term**
+Garlic private key retroactively allows recomputing that hop's
 `secret_i = ECDH(hop_private, ephemeral_public)` for any circuit whose
-traffic was recorded, *if* the ephemeral public key was observed
-(§4.1 of the protocol doc — it travels in the clear-to-the-hop portion of
-every circuitData message). A design with per-circuit hop-side ephemeral
-keys too (mutual ECDH) would close this gap; this version does not
-attempt it.
+traffic was recorded, *if* that hop's ephemeral public key was observed
+(§4.1 of the protocol doc — each hop's ephemeral public key travels in
+the clear-to-the-hop portion of the circuitData message addressed to
+it). This is inherent to any non-interactive telescoping construction
+(the crypto-hardening design spec's section A: "the immediate
+predecessor necessarily carries the next hop's ephemeral public key
+bytes as part of what it forwards") and is not something per-hop
+ephemeral keys were meant to close — only a mutual/reply-path ECDH on
+the hop side, which is out of scope (no reply path exists yet; see
+`LabelCircuitDataRecv`, reserved for future use), would close it.
 
 ## Memory DoS
 
@@ -256,11 +286,22 @@ message type in the protocol at all (§8 of `docs/garlic-protocol.md`).
 
 Padding, jitter, discovery/gossip, diverse hop selection, multipath
 pools, and cover-traffic bundling (items 1 and 3 from the prior version
-of this list) are now implemented and described above. Remaining
+of this list) are now implemented and described above. Per-hop ephemeral
+keys, HKDF domain separation, 128-bit `CircuitID`s, and signed service
+descriptors (the crypto-hardening pass — see
+`docs/superpowers/specs/2026-08-09-garlic-crypto-hardening-design.md`)
+are now also implemented, closing out what was items 1 and (new) 4 from
+an earlier version of this list — see "Identity correlation" and
+"Forward secrecy" above for what they closed and their residual scope,
+and the new "Service descriptor authentication" note below. Remaining
 priority order:
 
-1. Per-hop ephemeral keys (not one shared per circuit) to remove the
-   relay-collusion linkability signal and improve forward secrecy.
+1. Per-hop rewriting of `CircuitID`/`PacketCounter`/`Expiration` (the
+   residual linkability signal flagged in "Identity correlation" above
+   — these three `Envelope` fields still travel unencrypted and
+   unchanged hop-to-hop, so colluding non-adjacent relays can still
+   confirm they're on the same circuit even with no shared ephemeral
+   key).
 2. IP/ASN-diversity-aware Sybil resistance — `SelectDiversePath`'s only
    signal today is spanning-tree position, which a topologically
    diverse adversary defeats; a real improvement needs a diversity
@@ -273,4 +314,29 @@ priority order:
    bound exists; there is no policy actively deciding *when* within
    that bound to rotate.
 4. A distributed `Rendezvous` implementation, with its own threat-model
-   pass first (`docs/garlic-rendezvous.md`).
+   pass first (`docs/garlic-rendezvous.md`). Descriptor *authentication*
+   (GID self-certification, Ed25519 signature, expiry) is now solved
+   independent of how descriptors get distributed — a distributed
+   backend would inherit that authentication for free, since
+   verification lives in `Garlic.LookupService`, not in any particular
+   `Rendezvous` implementation — but distribution itself remains
+   `StaticRendezvous`-only.
+
+## Service descriptor authentication (new since the version of this document above predates it)
+
+`ServiceDescriptor` (`src/garlic/descriptor.go`) replaced the original
+unsigned, unauthenticated `IntroPoint` list this document's "Route /
+destination leakage" section above still described implicitly through
+`docs/garlic-protocol.md` §6. `GID = ComputeGID(ServicePublicKey,
+ServiceID)` is now bound to the new Ed25519 signing key (not the X25519
+circuit-ECDH key), making the GID self-certifying: nobody can produce a
+descriptor that both signs correctly *and* hashes to a given GID without
+holding that GID's signing private key. `Garlic.LookupService`
+(`src/garlic/manager.go`) verifies every descriptor a `Rendezvous`
+returns — GID match, Ed25519 signature, and `ExpiresAt` against the
+local clock — before trusting its `IntroPoints`
+(`VerifyServiceDescriptor`, `src/garlic/descriptor.go`). A malicious or
+compromised rendezvous can still withhold, reorder, or serve a
+stale-but-still-validly-signed descriptor; it cannot forge one for a GID
+it doesn't hold the signing key for. See `docs/garlic-rendezvous.md` for
+the full trust-boundary description.

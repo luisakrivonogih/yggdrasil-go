@@ -29,9 +29,9 @@ const (
 )
 
 // envelopeFixedHeaderSize is the size, in bytes, of the fixed-length
-// portion of the wire format: version(1) + circuit_id(8) + packet_counter(8)
+// portion of the wire format: version(1) + circuit_id(16) + packet_counter(8)
 // + expiration(8) + body_len(4).
-const envelopeFixedHeaderSize = 1 + 8 + 8 + 8 + 4
+const envelopeFixedHeaderSize = 1 + 16 + 8 + 8 + 4
 
 var (
 	ErrEnvelopeTooShort    = errors.New("garlic: envelope shorter than fixed header")
@@ -49,7 +49,7 @@ var (
 // carried and round-tripped but never interpreted.
 type Envelope struct {
 	Version       uint8
-	CircuitID     uint64
+	CircuitID     CircuitID
 	PacketCounter uint64
 	Expiration    uint64
 	Body          []byte
@@ -58,7 +58,7 @@ type Envelope struct {
 
 // Marshal encodes the envelope into its wire format:
 //
-//	version(1) circuit_id(8) packet_counter(8) expiration(8)
+//	version(1) circuit_id(16) packet_counter(8) expiration(8)
 //	body_len(4) body(body_len) padding_len(4) padding(padding_len)
 //
 // all integers big-endian.
@@ -72,7 +72,7 @@ func (e *Envelope) Marshal() ([]byte, error) {
 
 	buf := make([]byte, 0, envelopeFixedHeaderSize+len(e.Body)+4+len(e.Padding))
 	buf = append(buf, e.Version)
-	buf = binary.BigEndian.AppendUint64(buf, e.CircuitID)
+	buf = append(buf, e.CircuitID[:]...)
 	buf = binary.BigEndian.AppendUint64(buf, e.PacketCounter)
 	buf = binary.BigEndian.AppendUint64(buf, e.Expiration)
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(e.Body)))
@@ -165,18 +165,16 @@ func Unmarshal(data []byte) (*Envelope, error) {
 		return nil, ErrEnvelopeTooShort
 	}
 
-	e := &Envelope{
-		Version:       data[0],
-		CircuitID:     binary.BigEndian.Uint64(data[1:9]),
-		PacketCounter: binary.BigEndian.Uint64(data[9:17]),
-		Expiration:    binary.BigEndian.Uint64(data[17:25]),
-	}
+	e := &Envelope{Version: data[0]}
+	copy(e.CircuitID[:], data[1:17])
+	e.PacketCounter = binary.BigEndian.Uint64(data[17:25])
+	e.Expiration = binary.BigEndian.Uint64(data[25:33])
 	if e.Version != EnvelopeVersion1 {
 		return nil, ErrUnsupportedVersion
 	}
 
 	rest := data[envelopeFixedHeaderSize:]
-	bodyLen := binary.BigEndian.Uint32(data[25:29])
+	bodyLen := binary.BigEndian.Uint32(data[33:37])
 	if bodyLen > MaxBodySize {
 		return nil, ErrBodyTooLarge
 	}

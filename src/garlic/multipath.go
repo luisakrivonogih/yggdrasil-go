@@ -45,7 +45,7 @@ func (p *circuitPool) nextCircuit() (id CircuitID, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.circuits) == 0 {
-		return 0, false
+		return CircuitID{}, false
 	}
 	id = p.circuits[p.next%len(p.circuits)]
 	p.next++

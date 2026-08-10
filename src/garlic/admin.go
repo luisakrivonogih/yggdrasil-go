@@ -21,9 +21,9 @@ import (
 // SetupAdminHandlers registers this Garlic instance's admin socket
 // handlers, reachable via yggdrasilctl.
 func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
-	_ = a.AddHandler("getGarlicIdentity", "Show this node's Garlic identity public key", []string{},
+	_ = a.AddHandler("getGarlicIdentity", "Show this node's Garlic identity public key and signing public key", []string{},
 		func(in json.RawMessage) (interface{}, error) {
-			return map[string]string{"publicKey": hex.EncodeToString(g.identity.PublicKey)}, nil
+			return g.identityResponse(), nil
 		})
 
 	_ = a.AddHandler("garlicQueryCapability", "Query whether a node supports Garlic and its public key", []string{"key"},
@@ -338,6 +338,19 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 		})
 }
 
+// identityResponse builds the getGarlicIdentity admin response: this
+// node's long-term X25519 identity public key (used for circuit-hop
+// ECDH) and its Ed25519 signing public key (used to sign service
+// descriptors, see docs/garlic-rendezvous.md), both hex-encoded. Split
+// out from the handler closure so it can be tested without a real
+// admin.AdminSocket.
+func (g *Garlic) identityResponse() map[string]string {
+	return map[string]string{
+		"publicKey":        hex.EncodeToString(g.identity.PublicKey),
+		"signingPublicKey": hex.EncodeToString(g.identity.SigningPublicKey),
+	}
+}
+
 func poolIDToString(id PoolID) string {
 	return fmt.Sprintf("%d", uint64(id))
 }
@@ -377,15 +390,20 @@ func splitCommaList(s string) []string {
 }
 
 func circuitIDToString(id CircuitID) string {
-	return fmt.Sprintf("%d", uint64(id))
+	return hex.EncodeToString(id[:])
 }
 
 func circuitIDFromString(s string) (CircuitID, error) {
-	var id uint64
-	if _, err := fmt.Sscanf(s, "%d", &id); err != nil {
-		return 0, fmt.Errorf("invalid circuitId: %w", err)
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return CircuitID{}, fmt.Errorf("invalid circuitId: %w", err)
 	}
-	return CircuitID(id), nil
+	if len(b) != len(CircuitID{}) {
+		return CircuitID{}, fmt.Errorf("invalid circuitId: want %d bytes, got %d", len(CircuitID{}), len(b))
+	}
+	var id CircuitID
+	copy(id[:], b)
+	return id, nil
 }
 
 func parseCircuitIDRequest(in json.RawMessage) (CircuitID, error) {
@@ -393,7 +411,7 @@ func parseCircuitIDRequest(in json.RawMessage) (CircuitID, error) {
 		CircuitID string `json:"circuitId"`
 	}
 	if err := json.Unmarshal(in, &req); err != nil {
-		return 0, err
+		return CircuitID{}, err
 	}
 	return circuitIDFromString(req.CircuitID)
 }

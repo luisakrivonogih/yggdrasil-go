@@ -50,11 +50,68 @@ by the new node's presence.
 
 Full negotiation: each side's `QueryCapability` succeeds, returning the
 peer's supported versions and Garlic public key. If both advertise
-`garlic-v1`, circuits, capability caching, and delivery all work as
-described in `docs/garlic-protocol.md`. If either side has
-`garlic.enabled = false` in config, it behaves exactly like an "Old"
-node from the other's perspective — the *feature flag*, not the
-software version, determines behavior here.
+`garlic-v2` (`CapabilityGarlicV2`, `src/garlic/capability.go` — bumped
+from the original `garlic-v1` by the crypto-hardening pass, since that
+pass's wire-format changes are not compatible with a `garlic-v1` peer),
+circuits, capability caching, and delivery all work as described in
+`docs/garlic-protocol.md`. If either side has `garlic.enabled = false`
+in config, it behaves exactly like an "Old" node from the other's
+perspective — the *feature flag*, not the software version, determines
+behavior here.
+
+A fifth combination this section's title doesn't name but is worth
+stating explicitly: **a `garlic-v1`-only build talking to a `garlic-v2`
+build.** Both sides have Garlic *enabled*, so this isn't "Old ↔ New" in
+the sense above. Whether a `garlic-v1`-only peer actually gets excluded
+depends on *how* it would be selected — verified against
+`SupportsGarlicV2`'s (`src/garlic/capability.go`) actual call sites, the
+two paths behave differently, and only one of them checks it:
+
+- **Gossip/automatic discovery** (`garlicGossip`, then
+  `SelectPath`/`SelectDiversePath`): **enforced on only one of its two
+  entry points, and not currently load-bearing anyway.**
+  `SupportsGarlicV2` is checked in exactly one of the two places that
+  write into the discovery registry: `handleCapabilityResponse`
+  (`src/garlic/manager.go`) calls it before recording a peer that
+  answered *this* node's own direct capability query. But
+  `processAnnounce` (`src/garlic/protocol.go`) — the receive-side
+  handler for `msgTypeAnnounce` packets, which arrive whenever some peer
+  calls `garlicGossip` pointed at this node (`GossipAnnounce`,
+  `src/garlic/manager.go`) — writes into the same registry with no
+  version check at all, and structurally can't add one: `AnnouncePeer`
+  (`src/garlic/discovery.go`) carries only `NodeKey`/`GarlicPublicKey`,
+  no version field. `processAnnounce`'s own doc comment describes this
+  path as "an unauthenticated gossip channel." So a `garlic-v1`-only
+  peer's key *can* still end up in this node's discovery registry,
+  relayed in secondhand by any peer that already knows it — the
+  registry is not a reliable version filter. Separately, and regardless
+  of the above: `SelectPath`/`SelectDiversePath` (the registry's only
+  consumers) have no in-tree callers outside their own definition and
+  tests — no admin handler or other production code path invokes them
+  — so this discovery → selection pipeline doesn't drive any live
+  circuit construction today, independent of the version-check gap.
+- **Explicit admin-socket usage** (`createGarlicCircuit hops=...`,
+  `publishGarlicService introPoints=...`): **not enforced.** Neither
+  handler (`src/garlic/admin.go`) calls `SupportsGarlicV2`.
+  `createGarlicCircuit` only requires `QueryCapability` to succeed — any
+  capability response at all, regardless of advertised version — before
+  including a hop; `publishGarlicService` builds `IntroPoint`s straight
+  from caller-supplied keys with no capability check whatsoever. An
+  operator who explicitly names a `garlic-v1`-only peer through either
+  handler *will* get a circuit built (or a descriptor published) through
+  it.
+
+Nothing here is a two-way-safe negotiation: since the wire format
+genuinely changed (wider `CircuitID`, new HKDF labels —
+`docs/garlic-protocol.md` §4.1), a circuit routed through a
+`garlic-v1`-only hop fails at the wire-decoding level — garbled or
+rejected packets — rather than being excluded up front by capability
+negotiation. Garlic has no deployed compatibility guarantee to preserve
+across the version bump, and neither path above is an airtight
+version-mismatch guard in practice: gossip discovery filters direct
+capability responses but not relayed announcements (and doesn't
+currently feed any live circuit-construction path regardless), and the
+admin-socket paths perform no version check at all.
 
 ## The nuance the original request's diagrams don't quite capture
 

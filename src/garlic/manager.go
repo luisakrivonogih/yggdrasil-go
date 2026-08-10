@@ -8,14 +8,20 @@ package garlic
 // point needed, and §3.12 for the API shape this follows.
 //
 // Circuit construction here is deliberately non-interactive: the
-// originator generates one fresh ephemeral X25519 keypair per circuit
-// and computes ECDH against each hop's already-known long-term Garlic
-// public key (learned via capability negotiation) to derive that hop's
-// layer key. Every hop can independently redo the same ECDH on receipt
-// using its own long-term private key, so no telescoping handshake is
-// needed to set up a circuit - at the cost of every hop sharing the same
-// ephemeral public key for a given circuit, a known linkability
-// limitation documented in docs/garlic-security.md.
+// originator generates an independent ephemeral X25519 keypair for
+// *every* hop (CreateCircuit) and computes ECDH against each hop's
+// already-known long-term Garlic public key (learned via capability
+// negotiation) to derive that hop's layer key. Only the first hop's
+// ephemeral public key is sent up front; each subsequent hop's ephemeral
+// key is carried inside the previous hop's encrypted layer, so a hop
+// only learns it by successfully decrypting its own layer. Every hop can
+// independently redo the same ECDH on receipt using its own long-term
+// private key, so no telescoping handshake is needed to set up a
+// circuit. Because the ephemeral key differs per hop, non-adjacent hops
+// never observe a common ephemeral public key and cannot link a circuit
+// by comparing them - see docs/garlic-protocol.md §4.1 and
+// docs/garlic-threat-model.md's "Malicious relay" section for the full
+// construction and its properties.
 
 import (
 	"bytes"
@@ -243,7 +249,7 @@ func (g *Garlic) cleanupLoop() {
 
 // gossipTick sends this node's known-peer sample to a few
 // already-capability-verified peers (from capabilityCache, i.e. peers
-// this node has itself confirmed answer garlic-v1 - never an unverified
+// this node has itself confirmed answer garlic-v2 - never an unverified
 // discovery candidate), so discovery propagates without needing a
 // distributed directory.
 func (g *Garlic) gossipTick() {
@@ -391,10 +397,10 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 	ch := g.pending[key]
 	g.mu.Unlock()
 
-	// A successful, self-reported garlic-v1 response is exactly the
+	// A successful, self-reported garlic-v2 response is exactly the
 	// verification discovery candidates need before they're worth
 	// remembering - see discovery.go's doc comment.
-	if msg.SupportsGarlicV1() && len(msg.PublicKey) > 0 {
+	if msg.SupportsGarlicV2() && len(msg.PublicKey) > 0 {
 		g.discovery.record(DiscoveredPeer{NodeKey: append([]byte(nil), from...), GarlicPublicKey: msg.PublicKey})
 	}
 
@@ -485,32 +491,43 @@ func hopCountFromPaths(paths []core.PathEntryInfo, peer ed25519.PublicKey) (int,
 // with SendGarlic and CloseCircuit.
 func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (CircuitID, error) {
 	if len(path) == 0 || len(path) != len(nodeKeys) {
-		return 0, ErrInvalidPath
+		return CircuitID{}, ErrInvalidPath
 	}
-	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
-	if err != nil {
-		return 0, err
+
+	ephemeralPubs := make([][]byte, len(path))
+	ephemeralPrivs := make([][]byte, len(path))
+	for i := range path {
+		pub, priv, err := GenerateKeypair()
+		if err != nil {
+			return CircuitID{}, err
+		}
+		ephemeralPubs[i], ephemeralPrivs[i] = pub, priv
 	}
+
 	hops := make([]Hop, len(path))
 	for i := range path {
-		secret, err := ECDH(ephemeralPriv, path[i].PublicKey)
+		secret, err := ECDH(ephemeralPrivs[i], path[i].PublicKey)
 		if err != nil {
-			return 0, err
+			return CircuitID{}, err
 		}
-		key, err := DeriveKey(secret, nil, LabelLayerKey)
+		key, err := deriveLayerKey(secret)
 		if err != nil {
-			return 0, err
+			return CircuitID{}, err
 		}
-		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key}
+		var nextEphemeral []byte
+		if i+1 < len(path) {
+			nextEphemeral = ephemeralPubs[i+1]
+		}
+		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key, NextEphemeralPub: nextEphemeral}
 	}
 
 	c, err := g.circuits.Add(hops, g.cfg.CircuitLifetime, g.cfg.MaxPacketsPerCircuit, g.cfg.MaxBytesPerCircuit)
 	if err != nil {
-		return 0, err
+		return CircuitID{}, err
 	}
 
 	g.mu.Lock()
-	g.originEphemeral[c.ID] = ephemeralPub
+	g.originEphemeral[c.ID] = ephemeralPubs[0]
 	g.mu.Unlock()
 	return c.ID, nil
 }
@@ -706,7 +723,7 @@ func buildCircuitDataMessage(ephemeralPub []byte, id CircuitID, counter, expirat
 func buildCircuitDataBody(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     uint64(id),
+		CircuitID:     id,
 		PacketCounter: counter,
 		Expiration:    expiration,
 		Body:          onion,
@@ -735,20 +752,38 @@ func (g *Garlic) RecvGarlic(timeout time.Duration) (*DeliveredMessage, error) {
 	}
 }
 
-// PublishService advertises this node's identity as reachable at
-// introPoints for serviceID, returning the resulting GID.
+// PublishService signs and advertises this node's identity as reachable
+// at introPoints for serviceID, returning the resulting GID. The
+// descriptor is signed with this node's Garlic signing identity
+// (Identity.SigningPrivateKey), never the X25519 circuit-hop key.
 func (g *Garlic) PublishService(serviceID []byte, introPoints []IntroPoint, ttl time.Duration) (GID, error) {
-	gid := ComputeGID(g.identity.PublicKey, serviceID)
-	if err := g.rendezvous.Publish(gid, introPoints, ttl); err != nil {
+	gid := ComputeGID(g.identity.SigningPublicKey, serviceID)
+	now := uint64(time.Now().Unix())
+	descriptor, err := SignServiceDescriptor(g.identity.SigningPublicKey, g.identity.SigningPrivateKey, serviceID, introPoints, now, now+uint64(ttl.Seconds()))
+	if err != nil {
+		return GID{}, err
+	}
+	if err := g.rendezvous.Publish(gid, descriptor); err != nil {
 		return GID{}, err
 	}
 	return gid, nil
 }
 
 // LookupService returns the currently-published introduction points for
-// gid.
+// gid, after verifying the descriptor the rendezvous returned actually
+// matches gid, is validly signed, and is not expired (VerifyServiceDescriptor)
+// - a malicious or buggy rendezvous cannot make this return
+// attacker-controlled introduction points for a GID it doesn't hold the
+// signing key for.
 func (g *Garlic) LookupService(gid GID) ([]IntroPoint, error) {
-	return g.rendezvous.Lookup(gid)
+	descriptor, err := g.rendezvous.Lookup(gid)
+	if err != nil {
+		return nil, err
+	}
+	if err := VerifyServiceDescriptor(descriptor, gid, uint64(time.Now().Unix())); err != nil {
+		return nil, err
+	}
+	return descriptor.IntroPoints, nil
 }
 
 // Stats summarizes a Garlic instance's current state, for GetStats.

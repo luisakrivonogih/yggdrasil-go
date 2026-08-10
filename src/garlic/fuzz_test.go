@@ -17,7 +17,7 @@ import (
 func FuzzEnvelopeUnmarshal(f *testing.F) {
 	valid := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     1,
+		CircuitID:     testCircuitID(1),
 		PacketCounter: 1,
 		Expiration:    9999999999,
 		Body:          []byte("hello"),
@@ -47,7 +47,7 @@ func FuzzBundleUnmarshal(f *testing.F) {
 }
 
 func FuzzCapabilityMessageUnmarshal(f *testing.F) {
-	valid := &CapabilityMessage{Versions: []string{CapabilityGarlicV1}, PublicKey: make([]byte, KeySize)}
+	valid := &CapabilityMessage{Versions: []string{CapabilityGarlicV2}, PublicKey: make([]byte, KeySize)}
 	validBytes, _ := valid.Marshal()
 	f.Add(validBytes)
 	f.Add([]byte{})
@@ -80,6 +80,42 @@ func FuzzProcessCircuitData(f *testing.F) {
 	})
 }
 
+func FuzzLayerPlaintextUnmarshal(f *testing.F) {
+	valid := &LayerPlaintext{
+		NextHop:          []byte("next-hop-key"),
+		NextHopEphemeral: make([]byte, KeySize),
+		Inner:            []byte("inner ciphertext"),
+	}
+	validBytes, _ := valid.marshal()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 0})       // empty next_hop, truncated before the flag byte
+	f.Add([]byte{0, 0, 0, 0, 1})    // flag says "ephemeral present" but provides none
+	f.Add([]byte{0, 0, 0, 0, 2})    // invalid flag byte
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = unmarshalLayerPlaintext(data)
+	})
+}
+
+func FuzzServiceDescriptorFieldsUnmarshal(f *testing.F) {
+	id, err := NewIdentity()
+	if err != nil {
+		f.Fatalf("NewIdentity returned error: %v", err)
+	}
+	d, err := SignServiceDescriptor(id.SigningPublicKey, id.SigningPrivateKey, []byte("svc"), []IntroPoint{{NodeKey: []byte("intro")}}, 1000, 2000)
+	if err != nil {
+		f.Fatalf("SignServiceDescriptor returned error: %v", err)
+	}
+	validBytes, _ := d.signedBytes()
+	f.Add(validBytes)
+	f.Add([]byte{})
+	f.Add([]byte{0})
+	f.Add([]byte{255})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = unmarshalServiceDescriptorFields(data)
+	})
+}
+
 // buildTestCircuitDataForFuzz is a minimal standalone variant of
 // buildTestCircuitData (relay_logic_test.go) that doesn't depend on
 // *testing.T, since Fuzz seed setup runs outside a single subtest.
@@ -92,7 +128,7 @@ func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration
 	if err != nil {
 		return nil, err
 	}
-	key, err := DeriveKey(secret, nil, LabelLayerKey)
+	key, err := deriveLayerKey(secret)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +142,7 @@ func buildTestCircuitDataForFuzz(id *Identity, payload []byte, ttl time.Duration
 	}
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     uint64(c.ID),
+		CircuitID:     c.ID,
 		PacketCounter: counter,
 		Expiration:    uint64(time.Now().Add(ttl).Unix()),
 		Body:          onion,

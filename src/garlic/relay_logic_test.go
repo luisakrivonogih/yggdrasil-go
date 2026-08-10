@@ -14,21 +14,34 @@ import (
 // feed realistic input to processCircuitData without a real core.Core.
 func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys [][]byte, payload []byte, ttl time.Duration) (body []byte, circuitID CircuitID) {
 	t.Helper()
-	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
-	if err != nil {
-		t.Fatalf("GenerateKeypair returned error: %v", err)
+	// Mirrors Garlic.CreateCircuit: one independent ephemeral keypair per
+	// hop, chained via NextEphemeralPub, rather than one keypair reused
+	// for the whole path - see linkability_test.go for what this chain
+	// exists to prevent.
+	ephemeralPubs := make([][]byte, len(relayIdentities))
+	ephemeralPrivs := make([][]byte, len(relayIdentities))
+	for i := range relayIdentities {
+		pub, priv, err := GenerateKeypair()
+		if err != nil {
+			t.Fatalf("GenerateKeypair returned error: %v", err)
+		}
+		ephemeralPubs[i], ephemeralPrivs[i] = pub, priv
 	}
 	hops := make([]Hop, len(relayIdentities))
 	for i, id := range relayIdentities {
-		secret, err := ECDH(ephemeralPriv, id.PublicKey)
+		secret, err := ECDH(ephemeralPrivs[i], id.PublicKey)
 		if err != nil {
 			t.Fatalf("ECDH returned error: %v", err)
 		}
-		key, err := DeriveKey(secret, nil, LabelLayerKey)
+		key, err := deriveLayerKey(secret)
 		if err != nil {
-			t.Fatalf("DeriveKey returned error: %v", err)
+			t.Fatalf("deriveLayerKey returned error: %v", err)
 		}
-		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key}
+		var nextEphemeral []byte
+		if i+1 < len(relayIdentities) {
+			nextEphemeral = ephemeralPubs[i+1]
+		}
+		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key, NextEphemeralPub: nextEphemeral}
 	}
 	c, err := NewCircuit(hops, time.Minute, 100, 100000)
 	if err != nil {
@@ -40,7 +53,7 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 	}
 	env := &Envelope{
 		Version:       EnvelopeVersion1,
-		CircuitID:     uint64(c.ID),
+		CircuitID:     c.ID,
 		PacketCounter: counter,
 		Expiration:    uint64(time.Now().Add(ttl).Unix()),
 		Body:          onion,
@@ -49,7 +62,7 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
 	}
-	body = append(append([]byte(nil), ephemeralPub...), envBytes...)
+	body = append(append([]byte(nil), ephemeralPubs[0]...), envBytes...)
 	return body, c.ID
 }
 
@@ -204,6 +217,88 @@ func TestProcessCircuitDataForwardSkipsPaddingWhenDisabled(t *testing.T) {
 	}
 }
 
+// buildCircuitDataMissingNextHopEphemeral constructs a circuitData
+// message body for a 2-hop path (relayIdentity -> destNodeKey) whose
+// first hop's layer has a non-empty NextHop (there is a real next hop,
+// destNodeKey) but a nil NextEphemeralPub - a state Garlic.CreateCircuit
+// itself never produces (it always sets NextEphemeralPub to the next
+// hop's real ephemeral key whenever NextHop is non-empty), but one a
+// malicious or buggy originator could construct directly via the Hop
+// struct, same as this helper does.
+func buildCircuitDataMissingNextHopEphemeral(t *testing.T, relayIdentity *Identity, destNodeKey []byte) []byte {
+	t.Helper()
+	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair returned error: %v", err)
+	}
+	secret, err := ECDH(ephemeralPriv, relayIdentity.PublicKey)
+	if err != nil {
+		t.Fatalf("ECDH returned error: %v", err)
+	}
+	key, err := deriveLayerKey(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKey returned error: %v", err)
+	}
+	hops := []Hop{
+		// NextEphemeralPub deliberately left nil, unlike CreateCircuit's
+		// construction, even though a second hop (and therefore a
+		// non-empty NextHop) follows.
+		{NodeKey: []byte("relay-node-key"), Key: key, NextEphemeralPub: nil},
+		{NodeKey: destNodeKey, Key: make([]byte, KeySize)},
+	}
+	c, err := NewCircuit(hops, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("NewCircuit returned error: %v", err)
+	}
+	onion, _, counter, err := c.Seal([]byte("payload"))
+	if err != nil {
+		t.Fatalf("Seal returned error: %v", err)
+	}
+	env := &Envelope{
+		Version:       EnvelopeVersion1,
+		CircuitID:     c.ID,
+		PacketCounter: counter,
+		Expiration:    uint64(time.Now().Add(time.Minute).Unix()),
+		Body:          onion,
+	}
+	envBytes, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	return append(append([]byte(nil), ephemeralPub...), envBytes...)
+}
+
+// TestProcessCircuitDataDropsMissingNextHopEphemeral exercises the
+// len(layer.NextHopEphemeral) != KeySize guard added alongside the
+// chained-ephemeral-key fix (see linkability_test.go): a decrypted layer
+// that asks to be forwarded (NextHop set) but carries no next-hop
+// ephemeral key must be dropped, not forwarded with a truncated/absent
+// ephemeral prefix downstream.
+//
+// Note: only the "absent" (nil, wire-encoded as has_next_ephemeral=0)
+// case is reachable here. LayerPlaintext's wire encoding is a 1-byte
+// presence flag followed by either zero bytes or exactly KeySize bytes
+// (see layer.go's marshal/unmarshalLayerPlaintext) - there is no
+// encoding for a "wrong, non-KeySize, non-zero length" NextHopEphemeral,
+// so unmarshalLayerPlaintext can never produce one; any attempt to build
+// one via Hop.NextEphemeralPub fails earlier, at EncryptLayer/marshal
+// (ErrInvalidNextHopEphemeralSize). The guard's "!= KeySize" phrasing
+// still matches exactly one reachable case in practice (len == 0), which
+// is what this test constructs.
+func TestProcessCircuitDataDropsMissingNextHopEphemeral(t *testing.T) {
+	relay := newTestGarlic(t)
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+
+	msg := buildCircuitDataMissingNextHopEphemeral(t, relay.identity, destID.PublicKey)
+	action := relay.processCircuitData(msg)
+	if action.kind != actionDrop {
+		t.Fatalf("action.kind = %v, want actionDrop (NextHop set but NextHopEphemeral missing)", action.kind)
+	}
+}
+
 func TestProcessCircuitDataDropsWrongRecipient(t *testing.T) {
 	g := newTestGarlic(t)
 	other, err := NewIdentity()
@@ -312,15 +407,15 @@ func TestProcessAnnounceSkipsEmptyKeyEntries(t *testing.T) {
 	}
 }
 
-func TestProcessCapabilityRequestAdvertisesGarlicV1(t *testing.T) {
+func TestProcessCapabilityRequestAdvertisesGarlicV2(t *testing.T) {
 	g := newTestGarlic(t)
 	resp := g.processCapabilityRequest()
 	msg, err := UnmarshalCapabilityMessage(resp)
 	if err != nil {
 		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
 	}
-	if !msg.SupportsGarlicV1() {
-		t.Error("response does not advertise garlic-v1")
+	if !msg.SupportsGarlicV2() {
+		t.Error("response does not advertise garlic-v2")
 	}
 	if !bytes.Equal(msg.PublicKey, g.identity.PublicKey) {
 		t.Errorf("response PublicKey = %x, want %x", msg.PublicKey, g.identity.PublicKey)

@@ -99,16 +99,16 @@ NODEB_KEY=$(./yggdrasilctl -endpoint=tcp://localhost:9002 -json getself | python
 # Build a 1-hop circuit through nodeB. For multiple hops, pass
 # hops=key1,key2,key3 (comma-separated, ordered).
 ./yggdrasilctl -endpoint=tcp://localhost:9001 -json createGarlicCircuit hops=$NODEB_KEY
-# => {"circuitId": "11668724407072267096"}
+# => {"circuitId": "00112233445566778899aabbccddeeff"}
 
-CIRCUIT_ID=11668724407072267096
+CIRCUIT_ID=00112233445566778899aabbccddeeff
 PAYLOAD_HEX=$(python3 -c "print('hello bob, from alice, via garlic'.encode().hex())")
 
 ./yggdrasilctl -endpoint=tcp://localhost:9001 -json sendGarlic circuitId=$CIRCUIT_ID payload=$PAYLOAD_HEX
 
 # On nodeB, receive it (blocks up to timeoutSeconds waiting for delivery):
 ./yggdrasilctl -endpoint=tcp://localhost:9002 -json recvGarlic timeoutSeconds=5
-# => {"circuitId": "11668724407072267096", "payload": "68656c6c6f..."}
+# => {"circuitId": "00112233445566778899aabbccddeeff", "payload": "68656c6c6f..."}
 
 python3 -c "print(bytes.fromhex('68656c6c6f20626f622c2066726f6d20616c6963652c20766961206761726c6963').decode())"
 # => hello bob, from alice, via garlic

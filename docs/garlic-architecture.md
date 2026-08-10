@@ -288,13 +288,40 @@ construction rather than by careful testing.
 A dedicated request/response pair under `typeSessionProto`, structurally
 identical to NodeInfo (`typeProtoGarlicCapabilityRequest` /
 `typeProtoGarlicCapabilityResponse`), returning a small versioned bitset/list
-(e.g. `["garlic-v1"]`) plus the node's Garlic public key and GID-relevant
+(e.g. `["garlic-v2"]`) plus the node's Garlic public key and GID-relevant
 parameters if enabled. A node that gets no response (timeout) or an
 unparseable/absent response is assumed **legacy** and is simply never
 selected as a circuit hop or rendezvous point. This mirrors the task's
-required truth table exactly (A+B garlic-v1 → garlic-v1 usable; either side
+required truth table exactly (A+B garlic-v2 → garlic-v2 usable; either side
 legacy-only → falls back to ordinary Yggdrasil, i.e. Garlic is simply not
 attempted) and needs no change to the link handshake.
+
+**Update, verified against `src/garlic/capability.go` and its actual
+call sites in `manager.go`/`admin.go`:** the capability string shipped is
+`CapabilityGarlicV2 = "garlic-v2"`, bumped from the original
+`"garlic-v1"` sketched above as part of the crypto-hardening pass
+(`docs/garlic-protocol.md` §4.1's `LayerPlaintext`/`Envelope` wire
+changes are not backward-compatible with a `garlic-v1` peer). But the
+sketch above ("simply never selected as a circuit hop or rendezvous
+point") is stronger than what's actually enforced, and the difference
+matters: `SupportsGarlicV2()` has exactly one production call site,
+`handleCapabilityResponse` (`manager.go`), which gates whether a
+gossip-discovered peer is recorded into the discovery registry that
+`SelectPath`/`SelectDiversePath` draw candidates from — that's the only
+place a `garlic-v1`-only peer is actually excluded by version. The
+admin-socket handlers that build circuits and publish services directly
+never check it: `createGarlicCircuit` (`admin.go`) only requires
+`QueryCapability` to succeed — any capability response, regardless of
+advertised version — before including a hop, and `publishGarlicService`
+(`admin.go`) builds `IntroPoint`s straight from caller-supplied keys with
+no capability check whatsoever. An operator who explicitly names a
+`garlic-v1`-only peer via either handler would get a circuit built
+through it (or a descriptor published naming it as an introduction
+point) — and would then hit the wire-decoding failure mode directly
+(garbled/rejected packets, since the wire format genuinely changed), not
+a negotiation-time rejection. See `docs/garlic-compatibility.md`'s "New
+↔ New" section for the full breakdown of which paths enforce this and
+which don't.
 
 *Alternative considered and rejected*: piggybacking on the existing
 `NodeInfo` map. Rejected because NodeInfo is user-controlled, privacy-optional
@@ -325,17 +352,39 @@ into Garlic — it is simply the encrypted payload of an ordinary
 
 ### 3.6 Layered (onion) encryption — primitives, not a new cipher
 
-Per-hop: ephemeral X25519 ECDH between the sender (or previous hop's
-ephemeral key, for forward layers) and that hop's long-term Garlic X25519
-key, → HKDF with an explicit domain-separation label per key purpose
-(`"ygg-garlic-v1-layer-key"`, `"ygg-garlic-v1-circuit-key"`, etc., distinct
-from anything ironwood derives) → XChaCha20-Poly1305 AEAD (24-byte nonce,
-safe to derive per-packet from the counter rather than requiring a global
-random nonce registry) encrypting that hop's `{next_hop, inner_ciphertext}`.
+Per-hop: ephemeral X25519 ECDH between the sender and that hop's
+long-term Garlic X25519 key, → HKDF with an explicit domain-separation
+label per key purpose → XChaCha20-Poly1305 AEAD (24-byte nonce, safe to
+derive per-packet from the counter rather than requiring a global random
+nonce registry) encrypting that hop's `{next_hop, inner_ciphertext}`.
 A hop can only decrypt its own layer; it learns the next hop's address and
 nothing about layers further in or previously peeled. All from
 `golang.org/x/crypto` (`chacha20poly1305`, `hkdf`, `curve25519`) — no custom
 primitive, per the hard constraint in the task.
+
+**Update, verified against `src/garlic/crypto.go`:** the ephemeral key
+is per-hop, not a single circuit-wide keypair reused with every hop's
+ECDH — the circuit originator generates one independent ephemeral
+X25519 keypair per hop, and each hop's own encrypted layer carries the
+*next* hop's ephemeral public key (`LayerPlaintext.NextHopEphemeral`,
+`docs/garlic-protocol.md` §4.1), so a hop only learns it by successfully
+decrypting its own layer, never as a value forwarded unchanged past
+multiple hops. This closes the ephemeral-key linkability gap flagged in
+§7 below and in the crypto-hardening design spec's Problem section — see
+`docs/garlic-threat-model.md`'s "Malicious relay" section for what it
+does and doesn't prove. The HKDF label names shown above
+(`"ygg-garlic-v1-layer-key"`/`"ygg-garlic-v1-circuit-key"`) were this
+document's Phase-1 sketch and were never what shipped; the actual labels
+are a two-stage chain — the raw per-hop ECDH output is first specialized
+into an establishment secret via `LabelCircuitEstablish =
+"yggdrasil-garlic-v2-circuit-establish"`, and the packet-encryption key
+is derived from *that* via `LabelCircuitDataSend =
+"yggdrasil-garlic-v2-circuit-data-send"`. A third label,
+`LabelCircuitDataRecv = "yggdrasil-garlic-v2-circuit-data-recv"`, is
+reserved but unwired, specifically so a future reply path can't derive
+the same key material as the forward direction — see
+`docs/superpowers/specs/2026-08-09-garlic-crypto-hardening-design.md`
+section B.
 
 ### 3.7 Bundling
 
@@ -370,17 +419,44 @@ untouched. Lookup is via the `Rendezvous` abstraction (§3.9), not via
   X25519 keypair used only for that circuit's ECDH; rotation interval is
   configurable. This decouples "prove you're the same long-term service" from
   "correlate all my traffic by a single reusable transport key."
-- `Rendezvous` interface:
+
+  **Update:** "a fresh ephemeral X25519 keypair" (singular) was this
+  document's Phase-1 sketch of one ephemeral key reused for every hop's
+  ECDH. What actually shipped, per the crypto-hardening pass, is one
+  independent ephemeral keypair *per hop* (verified against
+  `src/garlic/manager.go`'s `CreateCircuit`) — see §3.6's update above
+  and `docs/garlic-protocol.md` §4.1 for the wire-level detail.
+- `Rendezvous` interface, current shape (updated from this document's
+  original pre-authentication sketch — see the note below the code
+  block), verified against `src/garlic/rendezvous.go`:
   ```go
   type Rendezvous interface {
-      Publish(gid GID, introPoints []IntroPoint, ttl time.Duration) error
-      Lookup(gid GID) ([]IntroPoint, error)
+      Publish(gid GID, descriptor *ServiceDescriptor) error
+      Lookup(gid GID) (*ServiceDescriptor, error)
   }
   ```
   First implementation: `StaticRendezvous`, a config/in-memory GID →
-  introduction-point-key-list map, sufficient to test circuit construction
-  end-to-end without any DHT work. A distributed implementation is future
-  work behind the same interface.
+  descriptor map, sufficient to test circuit construction end-to-end
+  without any DHT work. A distributed implementation is future work
+  behind the same interface.
+
+  **Update:** this document originally sketched a plain
+  `Publish(gid, introPoints []IntroPoint, ttl) error` /
+  `Lookup(gid) ([]IntroPoint, error)` interface — `IntroPoint` lists with
+  no signature anywhere, which meant a malicious or compromised
+  rendezvous could return attacker-controlled introduction points for
+  any GID. The service-descriptor-signing pass (crypto hardening design
+  spec section D) replaced it with the `*ServiceDescriptor`-based
+  interface shown above. `StaticRendezvous` still performs no
+  verification itself — it's untrusted storage/relay, which is exactly
+  the thing being defended against. Verification is the caller's job:
+  `Garlic.LookupService` (`src/garlic/manager.go`) runs every descriptor
+  a `Rendezvous` returns through `VerifyServiceDescriptor`
+  (`src/garlic/descriptor.go`) before trusting its `IntroPoints` —
+  checking that the descriptor's own `ServicePublicKey`/`ServiceID`
+  actually hash to the requested GID, that its Ed25519 signature
+  verifies, and that it hasn't expired. See `docs/garlic-rendezvous.md`
+  for the full description of this trust boundary.
 
 ### 3.10 Circuit construction (conceptual)
 

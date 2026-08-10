@@ -29,7 +29,7 @@ func TestCircuitManagerAddAndGet(t *testing.T) {
 
 func TestCircuitManagerGetMissingReturnsFalse(t *testing.T) {
 	m := NewCircuitManager(testManagerConfig())
-	if _, ok := m.Get(CircuitID(12345)); ok {
+	if _, ok := m.Get(testCircuitID(12345)); ok {
 		t.Error("Get() on unknown ID ok = true, want false")
 	}
 }
@@ -150,5 +150,21 @@ func TestCircuitManagerExpireStaleLeavesFreshCircuits(t *testing.T) {
 	}
 	if _, ok := m.Get(c.ID); !ok {
 		t.Fatal("Get() after ExpireStale() ok = false, want true (circuit still fresh)")
+	}
+}
+
+func TestCircuitManagerInsertCircuitLockedRejectsIDCollision(t *testing.T) {
+	m := NewCircuitManager(testManagerConfig())
+	id := testCircuitID(7)
+	first := &Circuit{ID: id}
+	if err := m.insertCircuitLocked(first); err != nil {
+		t.Fatalf("first insert returned error: %v", err)
+	}
+	second := &Circuit{ID: id}
+	if err := m.insertCircuitLocked(second); err == nil {
+		t.Fatal("expected error inserting a circuit with a colliding ID, got nil")
+	}
+	if got := m.circuits[id]; got != first {
+		t.Fatal("colliding insert replaced the original tracked circuit")
 	}
 }

@@ -17,7 +17,7 @@ func TestBuildCircuitDataMessageAppliesRandomPadding(t *testing.T) {
 
 	sizes := map[int]bool{}
 	for range 20 {
-		msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
+		msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
 		if err != nil {
 			t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 		}
@@ -37,7 +37,7 @@ func TestBuildCircuitDataMessageWithinConfiguredRange(t *testing.T) {
 		t.Fatalf("GenerateKeypair returned error: %v", err)
 	}
 
-	msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
+	msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
 	if err != nil {
 		t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestBuildCircuitDataMessageSkipsPaddingWhenDisabled(t *testing.T) {
 		t.Fatalf("GenerateKeypair returned error: %v", err)
 	}
 
-	msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
+	msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(1), 0, uint64(time.Now().Add(time.Minute).Unix()), []byte("onion"), cfg)
 	if err != nil {
 		t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuildCircuitDataMessageRoundTripsOnion(t *testing.T) {
 	}
 	onion := []byte("onion ciphertext bytes")
 
-	msg, err := buildCircuitDataMessage(ephemeralPub, CircuitID(42), 7, 999, onion, cfg)
+	msg, err := buildCircuitDataMessage(ephemeralPub, testCircuitID(42), 7, 999, onion, cfg)
 	if err != nil {
 		t.Fatalf("buildCircuitDataMessage returned error: %v", err)
 	}
@@ -122,10 +122,70 @@ func TestBuildCircuitDataMessageRoundTripsOnion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal returned error: %v", err)
 	}
-	if env.CircuitID != 42 || env.PacketCounter != 7 || env.Expiration != 999 {
+	if env.CircuitID != testCircuitID(42) || env.PacketCounter != 7 || env.Expiration != 999 {
 		t.Fatalf("envelope fields = %+v, want CircuitID=42 PacketCounter=7 Expiration=999", env)
 	}
 	if !bytes.Equal(env.Body, onion) {
 		t.Fatalf("Body = %q, want %q", env.Body, onion)
+	}
+}
+
+func TestPublishServiceThenLookupServiceRoundTrips(t *testing.T) {
+	id, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	g := &Garlic{
+		identity:   id,
+		cfg:        DefaultConfig(),
+		rendezvous: NewStaticRendezvous(),
+	}
+	points := []IntroPoint{{NodeKey: []byte("intro-1")}}
+
+	gid, err := g.PublishService([]byte("svc"), points, time.Hour)
+	if err != nil {
+		t.Fatalf("PublishService returned error: %v", err)
+	}
+	got, err := g.LookupService(gid)
+	if err != nil {
+		t.Fatalf("LookupService returned error: %v", err)
+	}
+	if len(got) != 1 || !bytes.Equal(got[0].NodeKey, []byte("intro-1")) {
+		t.Fatalf("LookupService = %+v, want one intro point %q", got, "intro-1")
+	}
+}
+
+func TestLookupServiceRejectsBogusRendezvousResponse(t *testing.T) {
+	id, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	attacker, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	rendezvous := NewStaticRendezvous()
+	g := &Garlic{identity: id, cfg: DefaultConfig(), rendezvous: rendezvous}
+
+	gid, err := g.PublishService([]byte("svc"), []IntroPoint{{NodeKey: []byte("real-intro")}}, time.Hour)
+	if err != nil {
+		t.Fatalf("PublishService returned error: %v", err)
+	}
+
+	// A malicious rendezvous overwrites the entry with an
+	// attacker-signed descriptor claiming attacker-controlled intro
+	// points - but it cannot make this validate against the real GID,
+	// since the GID is derived from the real service's signing key.
+	forgedPublishedAt := uint64(time.Now().Unix())
+	forged, err := SignServiceDescriptor(attacker.SigningPublicKey, attacker.SigningPrivateKey, []byte("svc"), []IntroPoint{{NodeKey: []byte("attacker-intro")}}, forgedPublishedAt, forgedPublishedAt+uint64(time.Hour.Seconds()))
+	if err != nil {
+		t.Fatalf("SignServiceDescriptor returned error: %v", err)
+	}
+	if err := rendezvous.Publish(gid, forged); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+
+	if _, err := g.LookupService(gid); err == nil {
+		t.Fatal("expected LookupService to reject the bogus rendezvous response, got nil")
 	}
 }

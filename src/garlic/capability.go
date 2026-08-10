@@ -4,16 +4,21 @@ package garlic
 // docs/garlic-architecture.md §3.4): an in-band request/response,
 // structurally mirroring how src/core's own NodeInfo protocol works,
 // reaching any node by key regardless of hop count. A node that never
-// responds (or responds without CapabilityGarlicV1) is treated as
+// responds (or responds without CapabilityGarlicV2) is treated as
 // legacy and never selected as a circuit hop or rendezvous point - see
 // (*Garlic) in manager.go for the request/response exchange itself; this
 // file is only the wire message the two sides exchange.
 
 import "errors"
 
-// CapabilityGarlicV1 is the capability string a Garlic-v1-capable node
-// advertises.
-const CapabilityGarlicV1 = "garlic-v1"
+// CapabilityGarlicV2 is the capability string a Garlic-v2-capable node
+// advertises. Bumped from garlic-v1 as part of the crypto hardening
+// pass (per-hop ephemeral keys, wider CircuitID, new HKDF labels) - see
+// docs/superpowers/specs/2026-08-09-garlic-crypto-hardening-design.md.
+// There is deliberately no v1/v2 dual negotiation: a peer that doesn't
+// advertise garlic-v2 is treated as legacy and never selected as a
+// circuit hop or rendezvous point.
+const CapabilityGarlicV2 = "garlic-v2"
 
 const (
 	maxCapabilityVersions   = 16
@@ -37,11 +42,11 @@ type CapabilityMessage struct {
 	PublicKey []byte
 }
 
-// SupportsGarlicV1 reports whether the message advertises
-// CapabilityGarlicV1.
-func (m *CapabilityMessage) SupportsGarlicV1() bool {
+// SupportsGarlicV2 reports whether the message advertises
+// CapabilityGarlicV2.
+func (m *CapabilityMessage) SupportsGarlicV2() bool {
 	for _, v := range m.Versions {
-		if v == CapabilityGarlicV1 {
+		if v == CapabilityGarlicV2 {
 			return true
 		}
 	}

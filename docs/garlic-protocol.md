@@ -46,16 +46,17 @@ size an observer could use as a fingerprint.
 ```
 offset  size  field
 0       1     version            (currently always 1)
-1       8     circuit_id         (uint64)
-9       8     packet_counter     (uint64)
-17      8     expiration         (uint64, Unix seconds)
-25      4     body_len           (uint32)
-29      body_len   body          (opaque - AEAD ciphertext at the layer level)
-29+body_len  4      padding_len  (uint32)
+1       16    circuit_id         (CircuitID, 128-bit random value)
+17      8     packet_counter     (uint64)
+25      8     expiration         (uint64, Unix seconds)
+33      4     body_len           (uint32)
+37      body_len   body          (opaque - AEAD ciphertext at the layer level)
+37+body_len  4      padding_len  (uint32)
 ...     padding_len  padding    (opaque, ignored on decode)
 ```
 
-Fixed header size: 29 bytes. `MaxBodySize` and `MaxPaddingSize` are both
+Fixed header size: 37 bytes (`envelopeFixedHeaderSize = 1 + 16 + 8 + 8 + 4`).
+`MaxBodySize` and `MaxPaddingSize` are both
 65535 (matching `core.Core.MTU()`'s own cap) — `Unmarshal` rejects a
 declared `body_len`/`padding_len` against this cap *before* checking it
 against the actual remaining buffer, so an attacker's claimed length can
@@ -79,7 +80,7 @@ offset  size  field
 ```
 
 `Versions` currently only ever contains the single string
-`"garlic-v1"` (`CapabilityGarlicV1`) in this implementation, but the
+`"garlic-v2"` (`CapabilityGarlicV2`) in this implementation, but the
 format allows a future node to advertise several. `PublicKey` is the
 responder's long-term Garlic X25519 public key (§6).
 
@@ -99,27 +100,49 @@ offset  size       field
 32      ...        Envelope (§2), whose Body is this hop's layer ciphertext
 ```
 
-`circuitDataMinSize = 32 + 29 = 61` bytes is the minimum a well-formed
-message can be; anything shorter is dropped immediately.
+`circuitDataMinSize = 32 + 37 = 69` bytes (`KeySize + envelopeFixedHeaderSize`)
+is the minimum a well-formed message can be; anything shorter is dropped
+immediately.
 
-### 4.1 Per-hop key derivation (non-interactive)
+### 4.1 Per-hop key derivation (chained per-hop ephemeral, non-interactive)
 
-The circuit's originator generates **one ephemeral X25519 keypair per
-circuit** (not per hop). For hop *i* with long-term Garlic public key
-`P_i` (learned via §3), the originator computes:
+The circuit's originator generates an **independent ephemeral X25519
+keypair per hop** (not one for the whole circuit). For hop *i* with
+long-term Garlic public key `P_i` (learned via §3), the originator
+computes:
 
 ```
-secret_i = X25519(ephemeral_private, P_i)
-key_i    = HKDF-SHA256(secret_i, salt=nil, info="yggdrasil-garlic-v1-layer-key")
+secret_i          = X25519(ephemeral_i_private, P_i)
+establish_secret_i = HKDF-SHA256(secret_i, salt=nil, info="yggdrasil-garlic-v2-circuit-establish")
+key_i              = HKDF-SHA256(establish_secret_i, salt=nil, info="yggdrasil-garlic-v2-circuit-data-send")
 ```
 
-Hop *i*, on receipt, independently computes the same `secret_i` via
-`X25519(P_i_private, ephemeral_public)` (Diffie-Hellman symmetry) and the
-same `key_i` via the identical HKDF call — **no interactive handshake is
-needed to establish `key_i`.** This is a deliberate simplification over
-Tor-style telescoping circuit construction; see
-`docs/garlic-security.md` §"Ephemeral key linkability" for the privacy
-cost of reusing one ephemeral public key across all hops of a circuit.
+Only `ephemeral_1_public` is sent as the wire prefix to hop 1 (§4, byte
+offset 0). Every other hop's ephemeral public key,
+`ephemeral_{i+1}_public`, is carried *inside* hop *i*'s own encrypted
+layer as `LayerPlaintext.next_hop_ephemeral` (§4.2) — a hop only learns
+the next hop's ephemeral key by successfully decrypting its own layer,
+never before. Hop *i*, on receipt, independently computes the same
+`secret_i` via `X25519(P_i_private, ephemeral_i_public)`
+(Diffie-Hellman symmetry) and the same `key_i` via the identical
+two-stage HKDF chain — no interactive handshake is needed to establish
+`key_i`.
+
+This gives the property that non-adjacent hops (e.g. hop 1 and hop 3 of
+a 3-hop circuit) never observe a common ephemeral public key and cannot
+link a circuit by comparing them — see
+`docs/garlic-threat-model.md`'s "Malicious relay" section and
+`TestNonAdjacentHopsCannotLinkViaEphemeralKeys`
+(`src/garlic/linkability_test.go`). It is the same shape as Tor's
+classical (non-Sphinx) telescoping circuit construction: an immediate
+predecessor hop necessarily relays its successor's ephemeral public key
+as plain routing information (it has to, to address the next hop) but
+never learns that key's private half.
+
+`LabelCircuitDataRecv` (`"yggdrasil-garlic-v2-circuit-data-recv"`) is
+reserved in the same derivation chain for a future reply/return path —
+no circuit today carries traffic in that direction, so it is currently
+unused.
 
 ### 4.2 Layer plaintext
 
@@ -127,11 +150,15 @@ cost of reusing one ephemeral public key across all hops of a circuit.
 
 ```
 offset  size          field
-0       4             next_hop_len       (max 256)
-4       next_hop_len  next_hop_key       (empty ⟺ this is the terminal hop)
-...     4             inner_len          (max 65535, = MaxBodySize)
-...     inner_len     inner              (next layer's ciphertext, or the
-                                           final payload if next_hop is empty)
+0       4             next_hop_len          (max 256)
+4       next_hop_len  next_hop_key          (empty ⟺ this is the terminal hop)
+...     1             has_next_ephemeral    (0 or 1)
+...     0 or 32       next_hop_ephemeral    (present ⟺ has_next_ephemeral == 1;
+                                              the ephemeral X25519 pubkey for the
+                                              hop after this one)
+...     4             inner_len             (max 65535, = MaxBodySize)
+...     inner_len     inner                 (next layer's ciphertext, or the
+                                              final payload if next_hop is empty)
 ```
 
 AEAD: XChaCha20-Poly1305 (`golang.org/x/crypto/chacha20poly1305`), 24-byte
@@ -164,10 +191,13 @@ split from the I/O wrapper):
    marshaling — the outgoing wire size on this hop's outbound link is
    unrelated to the size this hop received on its inbound link, by
    design (§9). Forward
-   `msgTypeCircuitData || ephemeral_public_key || new_envelope` to
-   `NextHop` unchanged. The ephemeral public key is passed through
-   byte-for-byte so every subsequent hop can perform the same §4.1
-   derivation with its own private key.
+   `msgTypeCircuitData || next_hop_ephemeral || new_envelope` to
+   `NextHop`, where `next_hop_ephemeral` is the value this hop just
+   decrypted from its own layer's `LayerPlaintext.next_hop_ephemeral`
+   (§4.2) — **not** the ephemeral public key this hop itself received.
+   A message whose decrypted layer has a non-empty `next_hop` but an
+   absent `next_hop_ephemeral` is malformed and dropped rather than
+   forwarded.
 
 ## 5. Replay protection
 
@@ -182,21 +212,74 @@ erratically an attacker drives the counter:
   source of `PacketCounter` values for a circuit it created, and
   `Circuit.Seal` guarantees they strictly increase per hop, per call.
 
+`CircuitID` is a 128-bit value drawn from `crypto/rand`
+(`src/garlic/circuit.go`, `randomCircuitID`) — widened from the original
+64 bits purely for collision resistance under random generation (there
+is no other bound it needs to satisfy: it carries no integer semantics,
+only equality comparison and use as a map key). `CircuitManager` (the
+originator's own circuit table) additionally guards against the
+vanishingly unlikely case of a locally-generated ID colliding with one
+it's already tracking, refusing the insert rather than silently
+overwriting the existing circuit's state (`ErrCircuitIDCollision`).
+
 ## 6. Identity and GID
 
-`src/garlic/identity.go`, `src/garlic/gid.go`. A node's long-term Garlic
-identity is an X25519 keypair, independent of its Yggdrasil ed25519
-identity. A Garlic Service ID:
+`src/garlic/identity.go`, `src/garlic/gid.go`, `src/garlic/descriptor.go`.
+A node's long-term Garlic identity now carries two independent
+keypairs, neither derived from the other:
+
+- an X25519 keypair (`Identity.PublicKey`/`PrivateKey`) for circuit-hop
+  ECDH, unchanged from before, and
+- an Ed25519 keypair (`Identity.SigningPublicKey`/`SigningPrivateKey`)
+  used only to sign service descriptors.
+
+A Garlic Service ID is now bound to the *signing* key:
 
 ```
-GID = version_byte(1) || BLAKE2b-256("yggdrasil-garlic-v1-gid" || public_key || service_id)
+GID = version_byte(1) || BLAKE2b-256("yggdrasil-garlic-v1-gid" || signing_public_key || service_id)
 ```
 
-35 bytes total, canonically encoded as unpadded base32
-(`gidEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)`).
-Computable and verifiable by anyone who knows `public_key` and
+(the GID domain separator string itself is unchanged; only which public
+key feeds it changed, from the X25519 identity key to the Ed25519
+signing key). 35 bytes total, canonically encoded as unpadded base32.
+Computable and verifiable by anyone who knows `signing_public_key` and
 `service_id`; never derived from or convertible to the underlying
 Yggdrasil IPv6 address.
+
+A published service is a signed `ServiceDescriptor`
+(`src/garlic/descriptor.go`), not a bare introduction-point list. What's
+signed (`ServiceDescriptor.signedBytes()`) is exactly:
+
+```
+offset  size            field
+0       1               version
+1       32              service_public_key   (ed25519)
+33      4               service_id_len        (max 64)
+...     service_id_len  service_id
+...     4               intro_point_count     (max MaxIntroPoints = 16)
+...     ...             per intro point: node_key_len(1) + node_key
+...     8                published_at          (unix seconds)
+...     8                expires_at             (unix seconds; expires_at -
+                                                   published_at capped at
+                                                   MaxDescriptorLifetime,
+                                                   7 days)
+```
+
+followed by a 64-byte Ed25519 `signature` over exactly those bytes — no
+field a rendezvous itself might add (receipt timestamps, sequence
+numbers, storage hints) is ever part of what's signed.
+
+`Rendezvous.Lookup` returns this descriptor **unverified** — the
+rendezvous is untrusted storage/relay, not a co-signer, and can
+withhold, reorder, or serve a stale copy. `Garlic.LookupService`
+(`src/garlic/manager.go`) is the client-side trust boundary: it
+recomputes the GID from the descriptor's own `service_public_key` and
+`service_id` (rejecting a mismatch — this is what makes the GID
+self-certifying), verifies the Ed25519 signature, and checks
+`expires_at` against the local clock, before returning the descriptor's
+introduction points to the caller. A malicious or buggy rendezvous
+cannot make a client accept an attacker-controlled service as the
+legitimate owner of a GID it doesn't hold the signing key for.
 
 ## 7. Bundling
 
