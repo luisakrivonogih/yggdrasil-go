@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"sync/atomic"
+	"time"
 
 	iwe "github.com/Arceliar/ironwood/encrypted"
 	iwn "github.com/Arceliar/ironwood/network"
@@ -47,11 +48,13 @@ type Core struct {
 	}
 	pathNotify    func(ed25519.PublicKey)
 	garlicHandler atomic.Pointer[GarlicHandler]
+	started       time.Time
 }
 
 func New(cert *tls.Certificate, logger Logger, opts ...SetupOption) (*Core, error) {
 	c := &Core{
-		log: logger,
+		log:     logger,
+		started: time.Now(),
 	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	if c.log == nil {
@@ -135,6 +138,11 @@ func New(cert *tls.Certificate, logger Logger, opts ...SetupOption) (*Core, erro
 		}
 	}
 	return c, nil
+}
+
+// Uptime returns how long this Core has been running.
+func (c *Core) Uptime() time.Duration {
+	return time.Since(c.started)
 }
 
 func (c *Core) RetryPeersNow() {

@@ -378,3 +378,15 @@ func TestGroupPassword(t *testing.T) {
 	_, _, err = connC.ReadFrom(buf[:])
 	require_Error(t, err)
 }
+
+func TestCoreUptimeIncreasesFromStart(t *testing.T) {
+	c := &Core{started: time.Now()}
+	time.Sleep(5 * time.Millisecond)
+	u := c.Uptime()
+	if u <= 0 {
+		t.Fatalf("Uptime() = %v, want > 0 shortly after start", u)
+	}
+	if u > time.Second {
+		t.Fatalf("Uptime() = %v, want a small duration just after start", u)
+	}
+}

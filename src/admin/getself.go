@@ -9,12 +9,13 @@ import (
 type GetSelfRequest struct{}
 
 type GetSelfResponse struct {
-	BuildName      string `json:"build_name"`
-	BuildVersion   string `json:"build_version"`
-	PublicKey      string `json:"key"`
-	IPAddress      string `json:"address"`
-	RoutingEntries uint64 `json:"routing_entries"`
-	Subnet         string `json:"subnet"`
+	BuildName      string  `json:"build_name"`
+	BuildVersion   string  `json:"build_version"`
+	PublicKey      string  `json:"key"`
+	IPAddress      string  `json:"address"`
+	RoutingEntries uint64  `json:"routing_entries"`
+	Subnet         string  `json:"subnet"`
+	Uptime         float64 `json:"uptime"`
 }
 
 func (a *AdminSocket) getSelfHandler(_ *GetSelfRequest, res *GetSelfResponse) error {
@@ -26,5 +27,6 @@ func (a *AdminSocket) getSelfHandler(_ *GetSelfRequest, res *GetSelfResponse) er
 	res.IPAddress = a.core.Address().String()
 	res.Subnet = snet.String()
 	res.RoutingEntries = self.RoutingEntries
+	res.Uptime = a.core.Uptime().Seconds()
 	return nil
 }
