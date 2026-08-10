@@ -8,6 +8,7 @@ package garlic_test
 // appears.
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -99,9 +100,54 @@ func TestGetGarlicStatsResponseShapeAndNoSecrets(t *testing.T) {
 	}
 }
 
+// TestGetGarlicCircuitsResponseShapeAndNoSecrets builds one real
+// originated circuit through the same public API path
+// createGarlicCircuit's admin handler uses (CreateCircuit + SendGarlic),
+// rather than asserting against an empty {"originated":[],"relayed":[]}
+// response. CreateCircuit derives a genuine per-hop AEAD key via
+// ECDH+HKDF for that hop (Circuit.hops[i].Key) - HopKeys() is supposed
+// to expose only the hop's NodeKey and never that derived key
+// (circuit.go's doc comment on HopKeys). A no-secret-leak scan over a
+// response with no circuits in it can't actually exercise that
+// distinction; it would pass just as trivially if HopKeys() leaked
+// Key too. This only strengthens the *originated* side: relayed-side
+// circuit state (relaystate.go's relayCircuitInfo) never stores
+// anything but hop NodeKeys and traffic counters in the first place -
+// populating it would require a full multi-node mesh with capability
+// negotiation (as in integration_test.go) for no corresponding increase
+// in what's actually at risk of leaking.
 func TestGetGarlicCircuitsResponseShapeAndNoSecrets(t *testing.T) {
 	g, c := newTestGarlicWithCore(t)
 	sockPath := newTestAdminSocket(t, c, g)
+
+	// hopIdentity's public key stands in for a real hop's long-term
+	// Garlic key - CreateCircuit ECDHs the circuit's ephemeral private
+	// key against it to derive that hop's layer key, exactly as it
+	// would for a real capability-verified peer.
+	hopIdentity, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	// nodeIdentity's public key is only ever used as the hop's NodeKey
+	// (the mesh address CreateCircuit's caller already knows in
+	// plaintext) - never as key material - but reuses NewIdentity for a
+	// convenient 32-byte value.
+	nodeIdentity, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	nodeKey := nodeIdentity.PublicKey
+
+	circuitID, err := g.CreateCircuit(
+		[]garlic.CapabilityMessage{{Versions: []string{"garlic-v1"}, PublicKey: hopIdentity.PublicKey}},
+		[][]byte{nodeKey},
+	)
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+	if err := g.SendGarlic(circuitID, []byte("hello")); err != nil {
+		t.Fatalf("SendGarlic returned error: %v", err)
+	}
 
 	resp := callAdmin(t, sockPath, "getGarlicCircuits")
 	for _, want := range []string{"originated", "relayed"} {
@@ -109,9 +155,36 @@ func TestGetGarlicCircuitsResponseShapeAndNoSecrets(t *testing.T) {
 			t.Errorf("getGarlicCircuits response missing expected field %q, got %+v", want, resp)
 		}
 	}
+
+	originated, ok := resp["originated"].([]interface{})
+	if !ok || len(originated) != 1 {
+		t.Fatalf("resp[\"originated\"] = %+v, want exactly 1 entry", resp["originated"])
+	}
+	entry, ok := originated[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("originated[0] = %+v, want a JSON object", originated[0])
+	}
+	wantHopHex := hex.EncodeToString(nodeKey)
+	hops, ok := entry["hops"].([]interface{})
+	if !ok || len(hops) != 1 || hops[0] != wantHopHex {
+		t.Fatalf("originated[0][\"hops\"] = %+v, want [%q]", entry["hops"], wantHopHex)
+	}
+	if packets, _ := entry["packets"].(float64); packets != 1 {
+		t.Errorf("originated[0][\"packets\"] = %v, want 1", entry["packets"])
+	}
+	if bytesSent, _ := entry["bytes"].(float64); bytesSent != 5 {
+		t.Errorf("originated[0][\"bytes\"] = %v, want 5 (len(\"hello\"))", entry["bytes"])
+	}
+
 	body, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
+	}
+	// Positive control: confirms the scan below runs over a genuinely
+	// populated response (containing the real hop key, hex-encoded) and
+	// not a vacuously-passing empty one.
+	if !strings.Contains(string(body), wantHopHex) {
+		t.Fatalf("response does not contain the expected hop key %q - test failed to populate a real circuit: %s", wantHopHex, body)
 	}
 	for _, forbidden := range []string{"privateKey", "PrivateKey", "secret", "Secret", "sessionKey", "aeadKey"} {
 		if strings.Contains(string(body), forbidden) {
