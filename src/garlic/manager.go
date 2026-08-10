@@ -8,14 +8,20 @@ package garlic
 // point needed, and §3.12 for the API shape this follows.
 //
 // Circuit construction here is deliberately non-interactive: the
-// originator generates one fresh ephemeral X25519 keypair per circuit
-// and computes ECDH against each hop's already-known long-term Garlic
-// public key (learned via capability negotiation) to derive that hop's
-// layer key. Every hop can independently redo the same ECDH on receipt
-// using its own long-term private key, so no telescoping handshake is
-// needed to set up a circuit - at the cost of every hop sharing the same
-// ephemeral public key for a given circuit, a known linkability
-// limitation documented in docs/garlic-security.md.
+// originator generates an independent ephemeral X25519 keypair for
+// *every* hop (CreateCircuit) and computes ECDH against each hop's
+// already-known long-term Garlic public key (learned via capability
+// negotiation) to derive that hop's layer key. Only the first hop's
+// ephemeral public key is sent up front; each subsequent hop's ephemeral
+// key is carried inside the previous hop's encrypted layer, so a hop
+// only learns it by successfully decrypting its own layer. Every hop can
+// independently redo the same ECDH on receipt using its own long-term
+// private key, so no telescoping handshake is needed to set up a
+// circuit. Because the ephemeral key differs per hop, non-adjacent hops
+// never observe a common ephemeral public key and cannot link a circuit
+// by comparing them - see docs/garlic-protocol.md §4.1 and
+// docs/garlic-threat-model.md's "Malicious relay" section for the full
+// construction and its properties.
 
 import (
 	"bytes"
