@@ -2,6 +2,7 @@ package garlic
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"testing"
 )
 
@@ -110,6 +111,66 @@ func TestLoadIdentityFromPrivateKeysRejectsWrongSize(t *testing.T) {
 	}
 	if _, err := LoadIdentityFromPrivateKeys(id.PrivateKey, make([]byte, 16)); err == nil {
 		t.Fatal("expected error for wrong-size signing private key seed, got nil")
+	}
+}
+
+func TestLoadIdentityFromPrivateKeyDerivesX25519AndGeneratesFreshSigningKey(t *testing.T) {
+	id, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	loaded, err := LoadIdentityFromPrivateKey(id.PrivateKey)
+	if err != nil {
+		t.Fatalf("LoadIdentityFromPrivateKey returned error: %v", err)
+	}
+	if !bytes.Equal(loaded.PublicKey, id.PublicKey) {
+		t.Errorf("derived X25519 PublicKey = %x, want %x", loaded.PublicKey, id.PublicKey)
+	}
+	if !bytes.Equal(loaded.PrivateKey, id.PrivateKey) {
+		t.Errorf("PrivateKey = %x, want %x", loaded.PrivateKey, id.PrivateKey)
+	}
+	if len(loaded.SigningPublicKey) != ed25519.PublicKeySize {
+		t.Fatalf("SigningPublicKey has length %d, want %d", len(loaded.SigningPublicKey), ed25519.PublicKeySize)
+	}
+	if len(loaded.SigningPrivateKey) != ed25519.PrivateKeySize {
+		t.Fatalf("SigningPrivateKey has length %d, want %d", len(loaded.SigningPrivateKey), ed25519.PrivateKeySize)
+	}
+	// The generated signing keypair must actually be usable (a valid,
+	// internally-consistent Ed25519 pair), and must not equal id's own
+	// signing key - it was never loaded from anywhere.
+	if bytes.Equal(loaded.SigningPublicKey, id.SigningPublicKey) {
+		t.Error("generated SigningPublicKey unexpectedly matches an unrelated identity's - not freshly generated")
+	}
+	sig := ed25519.Sign(loaded.SigningPrivateKey, []byte("probe"))
+	if !ed25519.Verify(loaded.SigningPublicKey, []byte("probe"), sig) {
+		t.Error("generated signing keypair does not round-trip a signature")
+	}
+}
+
+func TestLoadIdentityFromPrivateKeyRejectsWrongSize(t *testing.T) {
+	if _, err := LoadIdentityFromPrivateKey(make([]byte, 16)); err == nil {
+		t.Fatal("expected error for wrong-size X25519 private key, got nil")
+	}
+}
+
+func TestLoadIdentityFromPrivateKeyProducesDistinctSigningKeysAcrossCalls(t *testing.T) {
+	id, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	first, err := LoadIdentityFromPrivateKey(id.PrivateKey)
+	if err != nil {
+		t.Fatalf("LoadIdentityFromPrivateKey returned error: %v", err)
+	}
+	second, err := LoadIdentityFromPrivateKey(id.PrivateKey)
+	if err != nil {
+		t.Fatalf("LoadIdentityFromPrivateKey returned error: %v", err)
+	}
+	if !bytes.Equal(first.PublicKey, second.PublicKey) {
+		t.Error("two loads of the same X25519 private key produced different public keys")
+	}
+	if bytes.Equal(first.SigningPublicKey, second.SigningPublicKey) {
+		t.Error("two calls generated the same signing public key - each call should mint a fresh one")
 	}
 }
 

@@ -100,3 +100,33 @@ func LoadIdentityFromPrivateKeys(privateKey, signingPrivateKeySeed []byte) (*Ide
 		SigningPrivateKey: signingPrivateKey,
 	}, nil
 }
+
+// LoadIdentityFromPrivateKey reconstructs just the X25519 half of an
+// Identity from a persisted private key (deriving its public key, like
+// LoadIdentityFromPrivateKeys does for both halves), and generates a
+// fresh, independent Ed25519 signing keypair rather than loading one.
+//
+// This is the upgrade path for a node that already had a stable
+// Garlic.PrivateKey configured before Garlic.SigningPrivateKey existed:
+// its X25519 identity carries over unchanged, at the cost of a signing
+// identity (and thus GID, for any service it publishes) that is fresh
+// every run until Garlic.SigningPrivateKey is also configured.
+func LoadIdentityFromPrivateKey(privateKey []byte) (*Identity, error) {
+	if len(privateKey) != KeySize {
+		return nil, ErrInvalidIdentityKeySize
+	}
+	publicKey, err := DerivePublicKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	signingPub, signingPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Identity{
+		PublicKey:         publicKey,
+		PrivateKey:        append([]byte(nil), privateKey...),
+		SigningPublicKey:  signingPub,
+		SigningPrivateKey: signingPriv,
+	}, nil
+}
