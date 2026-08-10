@@ -50,11 +50,26 @@ by the new node's presence.
 
 Full negotiation: each side's `QueryCapability` succeeds, returning the
 peer's supported versions and Garlic public key. If both advertise
-`garlic-v1`, circuits, capability caching, and delivery all work as
-described in `docs/garlic-protocol.md`. If either side has
-`garlic.enabled = false` in config, it behaves exactly like an "Old"
-node from the other's perspective — the *feature flag*, not the
-software version, determines behavior here.
+`garlic-v2` (`CapabilityGarlicV2`, `src/garlic/capability.go` — bumped
+from the original `garlic-v1` by the crypto-hardening pass, since that
+pass's wire-format changes are not compatible with a `garlic-v1` peer),
+circuits, capability caching, and delivery all work as described in
+`docs/garlic-protocol.md`. If either side has `garlic.enabled = false`
+in config, it behaves exactly like an "Old" node from the other's
+perspective — the *feature flag*, not the software version, determines
+behavior here.
+
+A fifth combination this section's title doesn't name but is worth
+stating explicitly: **a `garlic-v1`-only build talking to a `garlic-v2`
+build.** Both sides have Garlic *enabled*, so this isn't "Old ↔ New" in
+the sense above, but `SupportsGarlicV2` (`src/garlic/capability.go`)
+returns false for a peer that doesn't advertise the new string, so the
+`garlic-v2` side treats the `garlic-v1` peer exactly like a capability
+timeout — never selected as a circuit hop or rendezvous point. This is
+deliberate: Garlic has no deployed compatibility guarantee to preserve,
+so a version mismatch fails capability negotiation cleanly rather than
+two incompatible wire-format parsers attempting to interpret each
+other's bytes.
 
 ## The nuance the original request's diagrams don't quite capture
 
