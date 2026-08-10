@@ -157,3 +157,68 @@ func TestCircuitSealRejectsAfterClose(t *testing.T) {
 		t.Fatal("expected error sealing a closed circuit, got nil")
 	}
 }
+
+func TestCircuitHopKeysReturnsOrderedNodeKeys(t *testing.T) {
+	hops := []Hop{
+		{NodeKey: []byte("node-a"), Key: make([]byte, 32)},
+		{NodeKey: []byte("node-b"), Key: make([]byte, 32)},
+	}
+	c, err := NewCircuit(hops, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("NewCircuit returned error: %v", err)
+	}
+	keys := c.HopKeys()
+	if len(keys) != 2 {
+		t.Fatalf("HopKeys() returned %d keys, want 2", len(keys))
+	}
+	if string(keys[0]) != "node-a" || string(keys[1]) != "node-b" {
+		t.Fatalf("HopKeys() = %q, want [node-a node-b]", keys)
+	}
+}
+
+func TestCircuitHopKeysIsACopy(t *testing.T) {
+	hops := []Hop{{NodeKey: []byte("node-a"), Key: make([]byte, 32)}}
+	c, err := NewCircuit(hops, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("NewCircuit returned error: %v", err)
+	}
+	keys := c.HopKeys()
+	keys[0][0] = 'X' // mutate the returned slice
+	if string(c.HopKeys()[0]) != "node-a" {
+		t.Fatal("mutating HopKeys()'s return value affected the circuit's internal hop state")
+	}
+}
+
+func TestCircuitTrafficStatsTracksSeals(t *testing.T) {
+	hops := []Hop{{NodeKey: []byte("node-a"), Key: make([]byte, 32)}}
+	c, err := NewCircuit(hops, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("NewCircuit returned error: %v", err)
+	}
+	packets, bytes := c.TrafficStats()
+	if packets != 0 || bytes != 0 {
+		t.Fatalf("TrafficStats() before any Seal = (%d, %d), want (0, 0)", packets, bytes)
+	}
+	if _, _, _, err := c.Seal([]byte("hello")); err != nil {
+		t.Fatalf("Seal returned error: %v", err)
+	}
+	packets, bytes = c.TrafficStats()
+	if packets != 1 || bytes != 5 {
+		t.Fatalf("TrafficStats() after one 5-byte Seal = (%d, %d), want (1, 5)", packets, bytes)
+	}
+}
+
+func TestCircuitIsClosedReflectsCloseCall(t *testing.T) {
+	hops := []Hop{{NodeKey: []byte("node-a"), Key: make([]byte, 32)}}
+	c, err := NewCircuit(hops, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("NewCircuit returned error: %v", err)
+	}
+	if c.IsClosed() {
+		t.Fatal("IsClosed() = true before Close(), want false")
+	}
+	c.Close()
+	if !c.IsClosed() {
+		t.Fatal("IsClosed() = false after Close(), want true")
+	}
+}

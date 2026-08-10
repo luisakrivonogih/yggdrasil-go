@@ -147,3 +147,32 @@ func (c *Circuit) Expired() bool {
 	defer c.mu.Unlock()
 	return time.Now().After(c.ExpiresAt)
 }
+
+// HopKeys returns a copy of this circuit's ordered hop node keys - the
+// path the originator itself chose when building the circuit. Safe to
+// expose: the originator already knows its own path in plaintext: this
+// isn't derived from decrypting anyone else's traffic.
+func (c *Circuit) HopKeys() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	keys := make([][]byte, len(c.hops))
+	for i, h := range c.hops {
+		keys[i] = append([]byte(nil), h.NodeKey...)
+	}
+	return keys
+}
+
+// TrafficStats returns how many packets and payload bytes this circuit
+// has sent via Seal so far.
+func (c *Circuit) TrafficStats() (packets, bytes uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.packetsSent, c.bytesSent
+}
+
+// IsClosed reports whether Close has been called on this circuit.
+func (c *Circuit) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
