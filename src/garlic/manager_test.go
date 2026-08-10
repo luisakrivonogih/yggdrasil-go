@@ -129,3 +129,42 @@ func TestBuildCircuitDataMessageRoundTripsOnion(t *testing.T) {
 		t.Fatalf("Body = %q, want %q", env.Body, onion)
 	}
 }
+
+func TestGetStatsIncludesTrafficAndSecurityTotals(t *testing.T) {
+	g := newTestGarlic(t)
+	stats := g.GetStats()
+	if stats.OriginatedCircuits != 0 || stats.RelayedCircuits != 0 {
+		t.Fatalf("stats = %+v, want zero circuit counts with nothing set up", stats)
+	}
+	if stats.OriginatedBytes != 0 || stats.RelayedBytes != 0 {
+		t.Fatalf("stats = %+v, want zero traffic totals with nothing set up", stats)
+	}
+	if stats.Security != (SecurityCounterSnapshot{}) {
+		t.Fatalf("stats.Security = %+v, want all zeros", stats.Security)
+	}
+}
+
+func TestOriginatedCircuitsExposesCircuitManagerList(t *testing.T) {
+	g := newTestGarlic(t)
+	g.circuits = NewCircuitManager(CircuitManagerConfig{MaxCircuits: 10, MaxCircuitsPerPeer: 10})
+	c, err := g.circuits.Add([]Hop{{NodeKey: []byte("peer-a"), Key: make([]byte, 32)}}, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("Add returned error: %v", err)
+	}
+	if _, _, _, err := c.Seal([]byte("hi")); err != nil {
+		t.Fatalf("Seal returned error: %v", err)
+	}
+
+	list := g.OriginatedCircuits()
+	if len(list) != 1 || list[0].ID != c.ID {
+		t.Fatalf("OriginatedCircuits() = %+v, want [circuit %d]", list, c.ID)
+	}
+
+	stats := g.GetStats()
+	if stats.OriginatedCircuits != 1 {
+		t.Fatalf("stats.OriginatedCircuits = %d, want 1", stats.OriginatedCircuits)
+	}
+	if stats.OriginatedPackets != 1 || stats.OriginatedBytes != 2 {
+		t.Fatalf("stats.OriginatedPackets, OriginatedBytes = %d, %d, want 1, 2", stats.OriginatedPackets, stats.OriginatedBytes)
+	}
+}

@@ -220,13 +220,63 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			return map[string]interface{}{"introPoints": keys}, nil
 		})
 
-	_ = a.AddHandler("getGarlicStats", "Show this node's current Garlic circuit counts", []string{},
+	_ = a.AddHandler("getGarlicStats", "Show this node's current Garlic circuit counts, traffic totals, and security counters", []string{},
 		func(in json.RawMessage) (interface{}, error) {
 			stats := g.GetStats()
-			return map[string]int{
+			return map[string]interface{}{
 				"originatedCircuits": stats.OriginatedCircuits,
 				"relayedCircuits":    stats.RelayedCircuits,
+				"originatedPackets":  stats.OriginatedPackets,
+				"originatedBytes":    stats.OriginatedBytes,
+				"relayedPackets":     stats.RelayedPackets,
+				"relayedBytes":       stats.RelayedBytes,
+				"security": map[string]uint64{
+					"replayDrops":      stats.Security.ReplayDrops,
+					"malformedPackets": stats.Security.MalformedPackets,
+					"expiredPackets":   stats.Security.ExpiredPackets,
+					"authFailures":     stats.Security.AuthFailures,
+					"relayTableFull":   stats.Security.RelayTableFull,
+				},
 			}, nil
+		})
+
+	_ = a.AddHandler("getGarlicCircuits", "List this node's active originated and relayed Garlic circuits", []string{},
+		func(in json.RawMessage) (interface{}, error) {
+			originated := g.OriginatedCircuits()
+			origOut := make([]map[string]interface{}, len(originated))
+			for i, c := range originated {
+				hops := c.HopKeys()
+				hopStrs := make([]string, len(hops))
+				for j, h := range hops {
+					hopStrs[j] = hex.EncodeToString(h)
+				}
+				packets, bytes := c.TrafficStats()
+				origOut[i] = map[string]interface{}{
+					"circuitId": circuitIDToString(c.ID),
+					"hops":      hopStrs,
+					"closed":    c.IsClosed(),
+					"createdAt": c.CreatedAt.UTC().Format(time.RFC3339),
+					"expiresAt": c.ExpiresAt.UTC().Format(time.RFC3339),
+					"packets":   packets,
+					"bytes":     bytes,
+				}
+			}
+
+			relayed := g.RelayCircuits()
+			relOut := make([]map[string]interface{}, len(relayed))
+			for i, r := range relayed {
+				relOut[i] = map[string]interface{}{
+					"circuitId":      circuitIDToString(r.ID),
+					"previousHop":    hex.EncodeToString(r.PreviousHop),
+					"nextHop":        hex.EncodeToString(r.NextHop),
+					"firstSeen":      r.FirstSeen.UTC().Format(time.RFC3339),
+					"lastActive":     r.LastActive.UTC().Format(time.RFC3339),
+					"packetsRelayed": r.PacketsRelayed,
+					"bytesRelayed":   r.BytesRelayed,
+				}
+			}
+
+			return map[string]interface{}{"originated": origOut, "relayed": relOut}, nil
 		})
 
 	_ = a.AddHandler("getGarlicKnownPeers", "List Garlic peers this node knows about (direct or via gossip)", []string{},

@@ -64,9 +64,11 @@ func newTestGarlic(t *testing.T) *Garlic {
 	if err != nil {
 		t.Fatalf("NewIdentity returned error: %v", err)
 	}
+	cfg := DefaultConfig()
 	return &Garlic{
 		identity:   id,
-		cfg:        DefaultConfig(),
+		cfg:        cfg,
+		circuits:   NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
 		relayState: newRelayCircuitState(1024),
 		delivered:  make(chan DeliveredMessage, 256),
 		discovery:  newDiscoveryRegistry(1024),

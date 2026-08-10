@@ -764,16 +764,51 @@ func (g *Garlic) LookupService(gid GID) ([]IntroPoint, error) {
 	return g.rendezvous.Lookup(gid)
 }
 
-// Stats summarizes a Garlic instance's current state, for GetStats.
+// Stats is a point-in-time summary of this node's Garlic circuit
+// activity - live counts and cumulative traffic totals across
+// currently-tracked circuits, plus the local-only security counters.
+// Computed on demand from the same live circuit/relay tables GetStats
+// always read - not a separately-maintained running total, so there's
+// only one place this data can drift from reality.
 type Stats struct {
 	OriginatedCircuits int
 	RelayedCircuits    int
+	OriginatedPackets  uint64
+	OriginatedBytes    uint64
+	RelayedPackets     uint64
+	RelayedBytes       uint64
+	Security           SecurityCounterSnapshot
 }
 
-// GetStats returns a snapshot of this instance's current circuit counts.
 func (g *Garlic) GetStats() Stats {
-	return Stats{
-		OriginatedCircuits: g.circuits.Count(),
-		RelayedCircuits:    g.relayState.count(),
+	circuits := g.circuits.List()
+	var origPackets, origBytes uint64
+	for _, c := range circuits {
+		p, b := c.TrafficStats()
+		origPackets += p
+		origBytes += b
 	}
+
+	relayed := g.relayState.snapshot()
+	var relPackets, relBytes uint64
+	for _, r := range relayed {
+		relPackets += r.PacketsRelayed
+		relBytes += r.BytesRelayed
+	}
+
+	return Stats{
+		OriginatedCircuits: len(circuits),
+		RelayedCircuits:    len(relayed),
+		OriginatedPackets:  origPackets,
+		OriginatedBytes:    origBytes,
+		RelayedPackets:     relPackets,
+		RelayedBytes:       relBytes,
+		Security:           g.security.snapshot(),
+	}
+}
+
+// OriginatedCircuits returns a snapshot of every circuit this node has
+// originated (built itself, as opposed to relaying for someone else).
+func (g *Garlic) OriginatedCircuits() []*Circuit {
+	return g.circuits.List()
 }
