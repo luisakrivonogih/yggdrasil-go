@@ -296,16 +296,32 @@ required truth table exactly (A+B garlic-v2 → garlic-v2 usable; either side
 legacy-only → falls back to ordinary Yggdrasil, i.e. Garlic is simply not
 attempted) and needs no change to the link handshake.
 
-**Update, verified against `src/garlic/capability.go`:** the capability
-string shipped is `CapabilityGarlicV2 = "garlic-v2"`, bumped from the
-original `"garlic-v1"` sketched above as part of the crypto-hardening
-pass (`docs/garlic-protocol.md` §4.1's `LayerPlaintext`/`Envelope` wire
-changes are not backward-compatible with a `garlic-v1` peer, so the
-version string bump makes a mixed old/new deployment fail capability
-negotiation cleanly — the old peer is just never selected as a hop —
-rather than two incompatible parsers silently misinterpreting each
-other's bytes). The truth table's shape is unchanged; only the version
-token is.
+**Update, verified against `src/garlic/capability.go` and its actual
+call sites in `manager.go`/`admin.go`:** the capability string shipped is
+`CapabilityGarlicV2 = "garlic-v2"`, bumped from the original
+`"garlic-v1"` sketched above as part of the crypto-hardening pass
+(`docs/garlic-protocol.md` §4.1's `LayerPlaintext`/`Envelope` wire
+changes are not backward-compatible with a `garlic-v1` peer). But the
+sketch above ("simply never selected as a circuit hop or rendezvous
+point") is stronger than what's actually enforced, and the difference
+matters: `SupportsGarlicV2()` has exactly one production call site,
+`handleCapabilityResponse` (`manager.go`), which gates whether a
+gossip-discovered peer is recorded into the discovery registry that
+`SelectPath`/`SelectDiversePath` draw candidates from — that's the only
+place a `garlic-v1`-only peer is actually excluded by version. The
+admin-socket handlers that build circuits and publish services directly
+never check it: `createGarlicCircuit` (`admin.go`) only requires
+`QueryCapability` to succeed — any capability response, regardless of
+advertised version — before including a hop, and `publishGarlicService`
+(`admin.go`) builds `IntroPoint`s straight from caller-supplied keys with
+no capability check whatsoever. An operator who explicitly names a
+`garlic-v1`-only peer via either handler would get a circuit built
+through it (or a descriptor published naming it as an introduction
+point) — and would then hit the wire-decoding failure mode directly
+(garbled/rejected packets, since the wire format genuinely changed), not
+a negotiation-time rejection. See `docs/garlic-compatibility.md`'s "New
+↔ New" section for the full breakdown of which paths enforce this and
+which don't.
 
 *Alternative considered and rejected*: piggybacking on the existing
 `NodeInfo` map. Rejected because NodeInfo is user-controlled, privacy-optional
@@ -410,40 +426,37 @@ untouched. Lookup is via the `Rendezvous` abstraction (§3.9), not via
   independent ephemeral keypair *per hop* (verified against
   `src/garlic/manager.go`'s `CreateCircuit`) — see §3.6's update above
   and `docs/garlic-protocol.md` §4.1 for the wire-level detail.
-- `Rendezvous` interface:
-  ```go
-  type Rendezvous interface {
-      Publish(gid GID, introPoints []IntroPoint, ttl time.Duration) error
-      Lookup(gid GID) ([]IntroPoint, error)
-  }
-  ```
-  First implementation: `StaticRendezvous`, a config/in-memory GID →
-  introduction-point-key-list map, sufficient to test circuit construction
-  end-to-end without any DHT work. A distributed implementation is future
-  work behind the same interface.
-
-  **Update, verified against `src/garlic/rendezvous.go`:** the interface
-  above was this document's original, pre-authentication sketch — plain
-  `IntroPoint` lists with no signature anywhere, which meant a malicious
-  or compromised rendezvous could return attacker-controlled introduction
-  points for any GID. The service-descriptor-signing pass (crypto
-  hardening design spec section D) replaced it with:
+- `Rendezvous` interface, current shape (updated from this document's
+  original pre-authentication sketch — see the note below the code
+  block), verified against `src/garlic/rendezvous.go`:
   ```go
   type Rendezvous interface {
       Publish(gid GID, descriptor *ServiceDescriptor) error
       Lookup(gid GID) (*ServiceDescriptor, error)
   }
   ```
-  `StaticRendezvous` still performs no verification itself — it's
-  untrusted storage/relay, which is exactly the thing being defended
-  against. Verification is the caller's job: `Garlic.LookupService`
-  (`src/garlic/manager.go`) runs every descriptor a `Rendezvous` returns
-  through `VerifyServiceDescriptor` (`src/garlic/descriptor.go`) before
-  trusting its `IntroPoints` — checking that the descriptor's own
-  `ServicePublicKey`/`ServiceID` actually hash to the requested GID, that
-  its Ed25519 signature verifies, and that it hasn't expired. See
-  `docs/garlic-rendezvous.md` for the full description of this trust
-  boundary.
+  First implementation: `StaticRendezvous`, a config/in-memory GID →
+  descriptor map, sufficient to test circuit construction end-to-end
+  without any DHT work. A distributed implementation is future work
+  behind the same interface.
+
+  **Update:** this document originally sketched a plain
+  `Publish(gid, introPoints []IntroPoint, ttl) error` /
+  `Lookup(gid) ([]IntroPoint, error)` interface — `IntroPoint` lists with
+  no signature anywhere, which meant a malicious or compromised
+  rendezvous could return attacker-controlled introduction points for
+  any GID. The service-descriptor-signing pass (crypto hardening design
+  spec section D) replaced it with the `*ServiceDescriptor`-based
+  interface shown above. `StaticRendezvous` still performs no
+  verification itself — it's untrusted storage/relay, which is exactly
+  the thing being defended against. Verification is the caller's job:
+  `Garlic.LookupService` (`src/garlic/manager.go`) runs every descriptor
+  a `Rendezvous` returns through `VerifyServiceDescriptor`
+  (`src/garlic/descriptor.go`) before trusting its `IntroPoints` —
+  checking that the descriptor's own `ServicePublicKey`/`ServiceID`
+  actually hash to the requested GID, that its Ed25519 signature
+  verifies, and that it hasn't expired. See `docs/garlic-rendezvous.md`
+  for the full description of this trust boundary.
 
 ### 3.10 Circuit construction (conceptual)
 

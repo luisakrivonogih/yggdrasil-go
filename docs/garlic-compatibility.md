@@ -62,14 +62,37 @@ behavior here.
 A fifth combination this section's title doesn't name but is worth
 stating explicitly: **a `garlic-v1`-only build talking to a `garlic-v2`
 build.** Both sides have Garlic *enabled*, so this isn't "Old ↔ New" in
-the sense above, but `SupportsGarlicV2` (`src/garlic/capability.go`)
-returns false for a peer that doesn't advertise the new string, so the
-`garlic-v2` side treats the `garlic-v1` peer exactly like a capability
-timeout — never selected as a circuit hop or rendezvous point. This is
-deliberate: Garlic has no deployed compatibility guarantee to preserve,
-so a version mismatch fails capability negotiation cleanly rather than
-two incompatible wire-format parsers attempting to interpret each
-other's bytes.
+the sense above. Whether a `garlic-v1`-only peer actually gets excluded
+depends on *how* it would be selected — verified against
+`SupportsGarlicV2`'s (`src/garlic/capability.go`) actual call sites, the
+two paths behave differently, and only one of them checks it:
+
+- **Gossip/automatic discovery** (`garlicGossip`, then
+  `SelectPath`/`SelectDiversePath`): enforced. `handleCapabilityResponse`
+  (`src/garlic/manager.go`) calls `SupportsGarlicV2` before recording a
+  peer into the discovery registry these selection functions draw
+  candidates from, so a `garlic-v1`-only peer is never added to that
+  pool in the first place.
+- **Explicit admin-socket usage** (`createGarlicCircuit hops=...`,
+  `publishGarlicService introPoints=...`): **not enforced.** Neither
+  handler (`src/garlic/admin.go`) calls `SupportsGarlicV2`.
+  `createGarlicCircuit` only requires `QueryCapability` to succeed — any
+  capability response at all, regardless of advertised version — before
+  including a hop; `publishGarlicService` builds `IntroPoint`s straight
+  from caller-supplied keys with no capability check whatsoever. An
+  operator who explicitly names a `garlic-v1`-only peer through either
+  handler *will* get a circuit built (or a descriptor published) through
+  it.
+
+Nothing here is a two-way-safe negotiation for the explicit-selection
+path: since the wire format genuinely changed (wider `CircuitID`, new
+HKDF labels — `docs/garlic-protocol.md` §4.1), a circuit explicitly
+routed through a `garlic-v1`-only hop fails at the wire-decoding level —
+garbled or rejected packets — rather than being excluded up front by
+capability negotiation. Garlic has no deployed compatibility guarantee
+to preserve across the version bump; the discovery path was written to
+fail closed on a version mismatch, but the explicit-selection admin
+handlers trust the caller's own choice of hop instead.
 
 ## The nuance the original request's diagrams don't quite capture
 
