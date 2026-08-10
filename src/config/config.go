@@ -56,6 +56,7 @@ type NodeConfig struct {
 	NodeInfoPrivacy     bool                       `comment:"By default, nodeinfo contains some defaults including the platform,\narchitecture and Yggdrasil version. These can help when surveying\nthe network and diagnosing network routing problems. Enabling\nnodeinfo privacy prevents this, so that only items specified in\n\"NodeInfo\" are sent back if specified."`
 	NodeInfo            map[string]interface{}     `comment:"Optional nodeinfo. This must be a { \"key\": \"value\", ... } map\nor set as null. This is entirely optional but, if set, is visible\nto the whole network on request."`
 	Garlic              GarlicConfig               `comment:"Configuration for the experimental Garlic Routing Overlay, an optional\nprivacy-enhanced routing layer built on top of Yggdrasil - see\ndocs/garlic-architecture.md. When Enabled is false (the default),\nbehavior is identical to a node with no Garlic support at all."`
+	Dashboard           DashboardConfig            `comment:"Configuration for the local operator dashboard - a web UI and\nread-only API showing this node's live status, traffic, peers, and\n(if enabled) Garlic circuits. Disabled by default. When enabled, the\nlistener should stay loopback-only - the dashboard and its API have\nno authentication of their own."`
 }
 
 // GarlicConfig holds configuration for the experimental Garlic Routing
@@ -85,6 +86,15 @@ type GarlicJitterConfig struct {
 	Enabled  bool   `comment:"Enables random pre-send delay. Default is true."`
 	MinDelay string `comment:"Minimum delay before sending (Go duration format, e.g. \"0s\")."`
 	MaxDelay string `comment:"Maximum delay before sending (Go duration format, e.g. \"75ms\")."`
+}
+
+// DashboardConfig holds configuration for the local operator dashboard.
+// The zero value (Enabled: false) means yggdrasil starts no dashboard
+// process and behaves exactly as it does today.
+type DashboardConfig struct {
+	Enabled bool   `comment:"Enables the local operator dashboard HTTP server (UI and its\nread-only API together) as a subprocess yggdrasil manages. Default is\nfalse."`
+	Listen  string `comment:"Listen address (host:port) for the dashboard's HTTP server. Must\ndefault to a loopback address (127.0.0.1 or ::1). Changing this to a\nnon-loopback address is your own choice and your own risk - the\ndashboard and its API have no authentication."`
+	Path    string `comment:"Directory containing the dashboard's built assets (the 'npm run\nbuild' output's build/ directory). Empty tries conventional install\npaths, then a path relative to the yggdrasil binary for development."`
 }
 
 type MulticastInterfaceConfig struct {
@@ -133,6 +143,11 @@ func GenerateConfig() *NodeConfig {
 		},
 		MaxDiscoveredPeers: 1024,
 		MinHopCount:        2,
+	}
+	cfg.Dashboard = DashboardConfig{
+		Enabled: false,
+		Listen:  "127.0.0.1:8080",
+		Path:    "",
 	}
 	if err := cfg.postprocessConfig(); err != nil {
 		panic(err)

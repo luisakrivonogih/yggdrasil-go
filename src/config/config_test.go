@@ -115,3 +115,16 @@ func TestConfig_Keys(t *testing.T) {
 		}
 	*/
 }
+
+func TestDashboardConfigDefaults(t *testing.T) {
+	cfg := GenerateConfig()
+	if cfg.Dashboard.Enabled {
+		t.Error("Dashboard.Enabled = true by default, want false")
+	}
+	if cfg.Dashboard.Listen != "127.0.0.1:8080" {
+		t.Errorf("Dashboard.Listen = %q, want \"127.0.0.1:8080\"", cfg.Dashboard.Listen)
+	}
+	if cfg.Dashboard.Path != "" {
+		t.Errorf("Dashboard.Path = %q, want empty (tries conventional install paths)", cfg.Dashboard.Path)
+	}
+}
