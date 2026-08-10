@@ -89,6 +89,21 @@ func (m *CircuitManager) Get(id CircuitID) (*Circuit, bool) {
 	return c, ok
 }
 
+// List returns a snapshot slice of every circuit currently tracked. The
+// returned slice is a copy of the map's contents at the time of the
+// call - safe to range over without holding m's lock, at the cost of
+// possibly being immediately stale (fine for the admin-facing snapshot
+// this exists for; nothing here is a hot path).
+func (m *CircuitManager) List() []*Circuit {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	list := make([]*Circuit, 0, len(m.circuits))
+	for _, c := range m.circuits {
+		list = append(list, c)
+	}
+	return list
+}
+
 // Close closes and stops tracking the circuit with the given ID, freeing
 // its slot in both the global and per-peer budgets. It is a no-op if the
 // ID isn't tracked.

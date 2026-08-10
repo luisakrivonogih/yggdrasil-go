@@ -152,3 +152,34 @@ func TestCircuitManagerExpireStaleLeavesFreshCircuits(t *testing.T) {
 		t.Fatal("Get() after ExpireStale() ok = false, want true (circuit still fresh)")
 	}
 }
+
+func TestCircuitManagerListReturnsAllTrackedCircuits(t *testing.T) {
+	m := NewCircuitManager(CircuitManagerConfig{MaxCircuits: 10, MaxCircuitsPerPeer: 10})
+	c1, err := m.Add([]Hop{{NodeKey: []byte("peer-a")}}, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("Add returned error: %v", err)
+	}
+	c2, err := m.Add([]Hop{{NodeKey: []byte("peer-b")}}, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("Add returned error: %v", err)
+	}
+
+	list := m.List()
+	if len(list) != 2 {
+		t.Fatalf("List() returned %d circuits, want 2", len(list))
+	}
+	found := map[CircuitID]bool{}
+	for _, c := range list {
+		found[c.ID] = true
+	}
+	if !found[c1.ID] || !found[c2.ID] {
+		t.Fatalf("List() = %+v, want to include %d and %d", list, c1.ID, c2.ID)
+	}
+}
+
+func TestCircuitManagerListEmptyWhenNoCircuits(t *testing.T) {
+	m := NewCircuitManager(CircuitManagerConfig{MaxCircuits: 10, MaxCircuitsPerPeer: 10})
+	if list := m.List(); len(list) != 0 {
+		t.Fatalf("List() = %+v, want empty", list)
+	}
+}
