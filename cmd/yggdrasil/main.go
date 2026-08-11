@@ -29,6 +29,7 @@ import (
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
+	"github.com/yggdrasil-network/yggdrasil-go/src/dashboard"
 	"github.com/yggdrasil-network/yggdrasil-go/src/multicast"
 	"github.com/yggdrasil-network/yggdrasil-go/src/tun"
 	"github.com/yggdrasil-network/yggdrasil-go/src/version"
@@ -40,6 +41,7 @@ type node struct {
 	multicast *multicast.Multicast
 	admin     *admin.AdminSocket
 	garlic    *garlic.Garlic
+	dashboard *dashboard.Process
 }
 
 // The main function is responsible for configuring and starting Yggdrasil.
@@ -336,6 +338,22 @@ func main() {
 		}
 	}
 
+	// Set up the local operator dashboard (optional, disabled by
+	// default). A failure here is always a warning, never fatal - the
+	// dashboard must never be the reason yggdrasil itself won't start.
+	{
+		if cfg.Dashboard.Enabled {
+			dcfg := dashboard.Config{
+				Listen:      cfg.Dashboard.Listen,
+				Path:        cfg.Dashboard.Path,
+				AdminListen: cfg.AdminListen,
+			}
+			if n.dashboard, err = dashboard.Start(dcfg, logger); err != nil {
+				logger.Warnln("Dashboard not started:", err)
+			}
+		}
+	}
+
 	//Windows service shutdown
 	minwinsvc.SetOnExit(func() {
 		logger.Infof("Shutting down service ...")
@@ -363,6 +381,14 @@ func main() {
 	if len(cfg.MulticastInterfaces) > 0 {
 		promises = append(promises, "mcast")
 	}
+	if cfg.Dashboard.Enabled {
+		// Only relevant on OpenBSD, where protect.Pledge actually
+		// enforces this - "proc" is needed to signal/wait on the
+		// already-spawned dashboard child process at shutdown. The
+		// exec() itself already happened above, before this pledge
+		// call, so "exec" doesn't need to be a standing promise.
+		promises = append(promises, "proc")
+	}
 	if err := protect.Pledge(strings.Join(promises, " ")); err != nil {
 		panic(fmt.Sprintf("pledge: %v: %v", promises, err))
 	}
@@ -377,6 +403,9 @@ func main() {
 	<-ctx.Done()
 
 	// Shut down the node.
+	if n.dashboard != nil {
+		_ = n.dashboard.Stop()
+	}
 	if n.garlic != nil {
 		n.garlic.Close()
 	}
