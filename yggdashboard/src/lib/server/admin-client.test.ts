@@ -132,4 +132,38 @@ describe('AdminClient', () => {
     respond(lastSocket!, { status: 'success', response: { ok: true } });
     await expect(second).resolves.toEqual({ ok: true });
   });
+
+  it('rejects a request on bad address, and subsequent requests on the same client also reject (not hang)', async () => {
+    const client = new AdminClient('http://bad:1234');
+    const first = client.request('getSelf');
+    await expect(first).rejects.toThrow();
+
+    // Second request on same client should also reject, not hang forever with connecting stuck true
+    const second = client.request('getSelf');
+    await expect(second).rejects.toThrow();
+  });
+
+  it('a socket error/close after being connected rejects its in-flight request, and does not clobber subsequent healthy reconnection', async () => {
+    const client = new AdminClient('tcp://127.0.0.1:9001');
+    const first = client.request('getSelf');
+    await vi.waitUntil(() => lastSocket !== null && lastSocket.written.length > 0);
+
+    // Socket is now connected and the request is written. Emit error followed by close.
+    const deadSocket = lastSocket;
+    deadSocket!.emit('error', new Error('connection reset'));
+    deadSocket!.emit('close');
+
+    // First request should reject
+    await expect(first).rejects.toThrow();
+
+    // Now make a second request. This should create a NEW socket (different object).
+    const second = client.request('getPeers');
+    await vi.waitUntil(() => createConnectionMock.mock.calls.length === 2);
+    const newSocket = lastSocket;
+    expect(newSocket).not.toBe(deadSocket);
+
+    // The new socket should work normally: respond and resolve
+    respond(newSocket!, { status: 'success', response: { peers: [] } });
+    await expect(second).resolves.toEqual({ peers: [] });
+  });
 });

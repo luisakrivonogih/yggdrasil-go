@@ -47,15 +47,23 @@ export function parseAdminAddress(address: string): { path: string } | { host: s
  * Every request is registered into sendQueue immediately and flushed
  * synchronously the instant a socket is usable - either right away (an
  * open socket already exists) or directly inside the 'connect' handler
- * (a fresh connection). This closes a race where awaiting a Promise
- * between "socket became ready" and "request is written and tracked"
- * left a window for a close or an already-arrived response to be
- * silently missed, permanently hanging the caller.
+ * (a fresh connection) - closing a race where an await between "socket
+ * became ready" and "request is written and tracked" could silently
+ * miss a close or an already-arrived response, permanently hanging the
+ * caller.
  */
 export class AdminClient {
   private address: string;
   private socket: net.Socket | null = null;
   private connecting = false;
+  // activeSocket identifies which physical socket object, if any, is
+  // allowed to affect this client's state right now - the socket
+  // currently connecting, or the socket currently connected. Once a
+  // socket is superseded (a newer attempt started), its event handlers
+  // keep firing (Node doesn't guarantee synchronous listener removal)
+  // but are guarded to no-op, so a stale socket's late 'close' can never
+  // clobber a healthier, subsequent connection's state.
+  private activeSocket: net.Socket | null = null;
   private buffer = '';
   private queue: PendingRequest[] = [];
   private sendQueue: QueuedSend[] = [];
@@ -67,20 +75,42 @@ export class AdminClient {
   private ensureConnected(): void {
     if (this.socket || this.connecting) return;
     this.connecting = true;
-    const opts = parseAdminAddress(this.address);
-    const socket = 'path' in opts ? net.createConnection({ path: opts.path }) : net.createConnection(opts);
+
+    let socket: net.Socket;
+    try {
+      const opts = parseAdminAddress(this.address);
+      socket = 'path' in opts ? net.createConnection({ path: opts.path }) : net.createConnection(opts);
+    } catch (err) {
+      // A synchronous throw here (e.g. an unparseable address) must not
+      // leave `connecting` stuck true forever - that would silently hang
+      // every request after the first.
+      this.connecting = false;
+      this.failSendQueue(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    this.activeSocket = socket;
 
     socket.once('connect', () => {
+      if (socket !== this.activeSocket) return;
       this.connecting = false;
       this.socket = socket;
       this.flushSendQueue();
     });
-    socket.once('error', () => {
-      this.connecting = false;
-      this.failSendQueue(new Error('admin socket connection failed'));
+    // net.Socket's 'close' event always fires directly following 'error'
+    // (whether or not the socket ever successfully connected) - so all
+    // cleanup lives in the 'close' handler below, and this listener only
+    // exists to stop an unhandled 'error' event from crashing the process.
+    socket.once('error', () => {});
+    socket.on('data', (chunk: Buffer) => {
+      if (socket !== this.activeSocket) return;
+      this.onData(chunk);
     });
-    socket.on('data', (chunk: Buffer) => this.onData(chunk));
-    socket.on('close', () => this.onClose());
+    socket.on('close', () => {
+      if (socket !== this.activeSocket) return;
+      this.activeSocket = null;
+      this.onClose();
+    });
   }
 
   private flushSendQueue(): void {
