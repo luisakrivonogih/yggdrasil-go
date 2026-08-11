@@ -13,6 +13,13 @@ interface PendingRequest {
   reject: (err: Error) => void;
 }
 
+interface QueuedSend {
+  name: string;
+  args: Record<string, unknown> | undefined;
+  resolve: (value: AdminResponse) => void;
+  reject: (err: Error) => void;
+}
+
 /**
  * Parses an admin socket address using the same unix://path or
  * tcp://host:port convention Yggdrasil's own AdminListen config uses.
@@ -36,52 +43,62 @@ export function parseAdminAddress(address: string): { path: string } | { host: s
  * were sent, which is safe because the Go server processes requests on
  * one connection sequentially, one at a time, so responses are written
  * back in the same order requests were read.
+ *
+ * Every request is registered into sendQueue immediately and flushed
+ * synchronously the instant a socket is usable - either right away (an
+ * open socket already exists) or directly inside the 'connect' handler
+ * (a fresh connection). This closes a race where awaiting a Promise
+ * between "socket became ready" and "request is written and tracked"
+ * left a window for a close or an already-arrived response to be
+ * silently missed, permanently hanging the caller.
  */
 export class AdminClient {
   private address: string;
   private socket: net.Socket | null = null;
-  private connecting: Promise<net.Socket> | null = null;
-  private connectingReject: ((err: Error) => void) | null = null;
+  private connecting = false;
   private buffer = '';
   private queue: PendingRequest[] = [];
+  private sendQueue: QueuedSend[] = [];
 
   constructor(address: string) {
     this.address = address;
   }
 
-  private connect(): Promise<net.Socket> {
-    if (this.socket && !this.socket.destroyed) {
-      return Promise.resolve(this.socket);
-    }
-    if (this.connecting) {
-      return this.connecting;
-    }
-    this.connecting = new Promise<net.Socket>((resolve, reject) => {
-      this.connectingReject = reject;
-      const opts = parseAdminAddress(this.address);
-      const socket = 'path' in opts ? net.createConnection({ path: opts.path }) : net.createConnection(opts);
+  private ensureConnected(): void {
+    if (this.socket || this.connecting) return;
+    this.connecting = true;
+    const opts = parseAdminAddress(this.address);
+    const socket = 'path' in opts ? net.createConnection({ path: opts.path }) : net.createConnection(opts);
 
-      const onConnect = () => {
-        if (this.connectingReject) {
-          this.socket = socket;
-          this.connectingReject = null;
-          this.connecting = null;
-          resolve(socket);
-        }
-      };
-      const onError = (err: Error) => {
-        if (this.connectingReject) {
-          this.connectingReject = null;
-          this.connecting = null;
-          reject(err);
-        }
-      };
-      socket.once('connect', onConnect);
-      socket.once('error', onError);
-      socket.on('data', (chunk: Buffer) => this.onData(chunk));
-      socket.on('close', () => this.onClose());
+    socket.once('connect', () => {
+      this.connecting = false;
+      this.socket = socket;
+      this.flushSendQueue();
     });
-    return this.connecting;
+    socket.once('error', () => {
+      this.connecting = false;
+      this.failSendQueue(new Error('admin socket connection failed'));
+    });
+    socket.on('data', (chunk: Buffer) => this.onData(chunk));
+    socket.on('close', () => this.onClose());
+  }
+
+  private flushSendQueue(): void {
+    if (!this.socket) return;
+    const socket = this.socket;
+    const toSend = this.sendQueue.splice(0);
+    for (const item of toSend) {
+      const payload = { request: item.name, arguments: item.args ?? {}, keepalive: true };
+      this.queue.push({ resolve: item.resolve, reject: item.reject });
+      socket.write(JSON.stringify(payload) + '\n');
+    }
+  }
+
+  private failSendQueue(err: Error): void {
+    const pending = this.sendQueue.splice(0);
+    for (const p of pending) {
+      p.reject(err);
+    }
   }
 
   private onData(chunk: Buffer): void {
@@ -96,29 +113,31 @@ export class AdminClient {
 
   private onClose(): void {
     this.socket = null;
-    if (this.connectingReject) {
-      const reject = this.connectingReject;
-      this.connectingReject = null;
-      this.connecting = null;
-      reject(new Error('admin socket connection closed'));
-    }
+    this.connecting = false;
     const pending = this.queue.splice(0);
     for (const p of pending) {
       p.reject(new Error('admin socket connection closed'));
     }
+    this.failSendQueue(new Error('admin socket connection closed'));
   }
 
-  async request<T = unknown>(name: string, args?: Record<string, unknown>): Promise<T> {
-    const socket = await this.connect();
-    const payload = { request: name, arguments: args ?? {}, keepalive: true };
-    const result = await new Promise<AdminResponse>((resolve, reject) => {
-      this.queue.push({ resolve, reject });
-      socket.write(JSON.stringify(payload) + '\n');
+  request<T = unknown>(name: string, args?: Record<string, unknown>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.sendQueue.push({
+        name,
+        args,
+        resolve: (result: AdminResponse) => {
+          if (result.status !== 'success') {
+            reject(new Error(result.error || `admin request '${name}' failed`));
+            return;
+          }
+          resolve(result.response as T);
+        },
+        reject
+      });
+      this.ensureConnected();
+      if (this.socket) this.flushSendQueue();
     });
-    if (result.status !== 'success') {
-      throw new Error(result.error || `admin request '${name}' failed`);
-    }
-    return result.response as T;
   }
 
   close(): void {
