@@ -14,3 +14,14 @@ const client = new AdminClient(config.adminSocket);
  */
 export const poller = new Poller(client, config.pollIntervalMs, config.historyWindowMs);
 poller.start();
+
+// Vite's dev-mode SSR module graph re-evaluates this module on HMR
+// (unlike a production build, where Node's module cache guarantees a
+// single evaluation) - without this, every edit touching instance.ts or
+// its dependency chain would spawn a brand-new Poller/AdminClient/timer
+// on top of the old one, which is never told to stop.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    poller.stop();
+  });
+}

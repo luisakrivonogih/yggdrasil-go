@@ -14,10 +14,22 @@ vi.mock('$lib/server/instance', () => ({
           originatedBytes: 100,
           relayedPackets: 0,
           relayedBytes: 0,
-          security: { replayDrops: 0, malformedPackets: 0, expiredPackets: 0, authFailures: 0, relayTableFull: 0 }
+          security: { replayDrops: 0, malformedPackets: 0, expiredPackets: 0, authFailures: 0, relayTableFull: 0 },
+          // Simulates a hypothetical future admin field on getGarlicStats
+          // that this builder must not blindly pass through.
+          privateKey: 'must-not-leak-from-stats'
         },
         circuits: { originated: [], relayed: [] },
-        knownPeers: []
+        knownPeers: [
+          {
+            nodeKey: 'a',
+            garlicPublicKey: 'b',
+            lastSeen: '2026-08-10T00:00:00.000Z',
+            // Simulates a hypothetical future admin field on
+            // getGarlicKnownPeers entries that must not leak either.
+            privateKey: 'must-not-leak-from-knownpeers'
+          }
+        ]
       }
     }))
   }
