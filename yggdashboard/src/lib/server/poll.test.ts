@@ -165,4 +165,58 @@ describe('Poller', () => {
     await vi.advanceTimersByTimeAsync(10000);
     expect(poller.getSnapshot().polledAt).toBe(before);
   });
+
+  it('does not let a later poll mutate an already-returned snapshot\'s history array', async () => {
+    const client = fakeClient({ ...CORE_RESPONSES, ...GARLIC_RESPONSES });
+    const poller = new Poller(client, 2000, 300000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const firstHistory = poller.getSnapshot().history;
+    expect(firstHistory.length).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(2000); // second poll
+
+    expect(poller.getSnapshot().history.length).toBe(2);
+    // The array reference an earlier caller already holds must be
+    // untouched by the later poll - same length, not the same reference
+    // as the new history array.
+    expect(firstHistory.length).toBe(1);
+    expect(poller.getSnapshot().history).not.toBe(firstHistory);
+    poller.stop();
+  });
+
+  it('discards an in-flight tick that completes after stop() was called', async () => {
+    let releaseGate: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const client = {
+      request: vi.fn(async (name: string) => {
+        if (name === 'getSelf') await gate; // block this tick mid-flight
+        if (name in GARLIC_RESPONSES) return (GARLIC_RESPONSES as Record<string, unknown>)[name];
+        return (CORE_RESPONSES as Record<string, unknown>)[name];
+      })
+    } as unknown as AdminClient;
+
+    const poller = new Poller(client, 2000, 300000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The tick is still blocked on the gate - nothing has landed yet.
+    expect(poller.getSnapshot().ready).toBe(false);
+
+    poller.stop();
+    releaseGate!();
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    // The tick that was in flight when stop() was called must not
+    // overwrite the snapshot after the fact, even though it eventually
+    // completed.
+    const snap = poller.getSnapshot();
+    expect(snap.ready).toBe(false);
+    expect(snap.self.build_name).toBe('');
+  });
 });

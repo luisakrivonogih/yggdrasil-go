@@ -41,6 +41,12 @@ export class Poller {
   private prevGarlicBytes: { originated: number; relayed: number; t: number } | null = null;
   private readyWaiters: Array<() => void> = [];
   private hasPolledOnce = false;
+  // Incremented on every tick() start and on every stop(). A tick only
+  // commits its result if this still matches the token it captured when
+  // it began - so a tick still in flight when stop() is called (or a
+  // slower, older tick superseded by a newer one that already started)
+  // never overwrites this.latest/this.history after the fact.
+  private tickToken = 0;
 
   constructor(client: AdminClient, intervalMs: number, historyWindowMs: number) {
     this.client = client;
@@ -57,6 +63,7 @@ export class Poller {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.tickToken++;
   }
 
   getSnapshot(): Snapshot {
@@ -81,6 +88,8 @@ export class Poller {
   }
 
   private async tick(): Promise<void> {
+    const token = ++this.tickToken;
+
     const [selfRes, peersRes, sessionsRes, treeRes, pathsRes] = await Promise.allSettled([
       this.client.request<SelfInfo>('getSelf'),
       this.client.request<{ peers: PeerEntry[] }>('getPeers'),
@@ -89,6 +98,11 @@ export class Poller {
       this.client.request<{ paths: PathEntry[] }>('getPaths')
     ]);
     const garlic = await this.pollGarlic();
+
+    // This tick was superseded (stop() was called, or a newer tick
+    // already started) while the requests above were in flight - discard
+    // its result rather than write stale data over whatever's current.
+    if (token !== this.tickToken) return;
 
     const self = selfRes.status === 'fulfilled' ? selfRes.value : this.latest.self;
     const peers = peersRes.status === 'fulfilled' ? peersRes.value.peers : this.latest.peers;
@@ -125,8 +139,12 @@ export class Poller {
       ? { originated: garlic.stats.originatedBytes, relayed: garlic.stats.relayedBytes, t: now }
       : null;
 
-    this.history.push({ t: now, rxRate, txRate, garlicRelayedRate, garlicOriginatedRate });
-    this.history = this.history.filter((s) => now - s.t <= this.historyWindowMs);
+    // Build a new array rather than mutating this.history in place - an
+    // older Snapshot returned by an earlier getSnapshot() call still
+    // holds a reference to the previous history array, and it must not
+    // silently gain elements or otherwise change after the fact.
+    const sample = { t: now, rxRate, txRate, garlicRelayedRate, garlicOriginatedRate };
+    this.history = [...this.history, sample].filter((s) => now - s.t <= this.historyWindowMs);
 
     this.latest = {
       self,
