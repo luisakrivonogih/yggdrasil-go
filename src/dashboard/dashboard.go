@@ -118,7 +118,11 @@ func (p *Process) Stop() error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	return p.cmd.Process.Kill()
+	if err := p.cmd.Process.Kill(); err != nil {
+		return err
+	}
+	_ = p.cmd.Wait() // reap the child; "signal: killed" is the expected error here, not a failure
+	return nil
 }
 
 // prefixWriter forwards each line written to it to logger.Printf,
