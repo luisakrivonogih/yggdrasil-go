@@ -5,9 +5,15 @@
   let copied = $state(false);
 
   async function copy() {
-    await navigator.clipboard.writeText(value);
-    copied = true;
-    setTimeout(() => (copied = false), 1200);
+    try {
+      await navigator.clipboard.writeText(value);
+      copied = true;
+      setTimeout(() => (copied = false), 1200);
+    } catch {
+      // Clipboard write can reject (permission denied, insecure origin,
+      // lost focus) - leave `copied` false rather than throw an unhandled
+      // rejection or falsely show success.
+    }
   }
 </script>
 
