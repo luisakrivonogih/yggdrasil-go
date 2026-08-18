@@ -65,6 +65,7 @@ type NodeConfig struct {
 type GarlicConfig struct {
 	Enabled            bool                `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
 	PrivateKey         KeyBytes            `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
+	SigningPrivateKey  KeyBytes            `json:",omitempty" comment:"This node's Garlic service-descriptor signing key (Ed25519 seed,\n32 bytes). Independent of both PrivateKey above and your main\nYggdrasil key. Used only when publishing a Garlic service - see\ndocs/garlic-protocol.md section 6. If left unset while Enabled is\ntrue, a fresh key is generated at startup."`
 	PathLength         int                 `comment:"Number of hops for circuits this node originates."`
 	CircuitLifetime    string              `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
 	MaxCircuits        int                 `comment:"Maximum number of circuits this node will originate at once."`

@@ -1,6 +1,7 @@
 package garlic
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -29,7 +30,7 @@ func TestCircuitManagerAddAndGet(t *testing.T) {
 
 func TestCircuitManagerGetMissingReturnsFalse(t *testing.T) {
 	m := NewCircuitManager(testManagerConfig())
-	if _, ok := m.Get(CircuitID(12345)); ok {
+	if _, ok := m.Get(testCircuitID(12345)); ok {
 		t.Error("Get() on unknown ID ok = true, want false")
 	}
 }
@@ -188,8 +189,10 @@ func TestCircuitManagerListIsSortedByCircuitID(t *testing.T) {
 	m := NewCircuitManager(CircuitManagerConfig{MaxCircuits: 32, MaxCircuitsPerPeer: 32})
 	// Insert with deliberately unsorted IDs so a List() that just ranged
 	// over the map (Go randomizes map iteration order per call) would
-	// almost certainly come back out of order.
-	ids := []CircuitID{9, 2, 7, 1, 40, 3}
+	// almost certainly come back out of order. testCircuitID encodes n
+	// into the trailing 8 bytes big-endian, so byte-wise comparison of
+	// the resulting [16]byte still preserves numeric order.
+	ids := []CircuitID{testCircuitID(9), testCircuitID(2), testCircuitID(7), testCircuitID(1), testCircuitID(40), testCircuitID(3)}
 	for i, id := range ids {
 		c, err := m.Add([]Hop{{NodeKey: []byte{byte(i)}}}, time.Minute, 100, 100000)
 		if err != nil {
@@ -208,12 +211,28 @@ func TestCircuitManagerListIsSortedByCircuitID(t *testing.T) {
 		t.Fatalf("List() returned %d circuits, want %d", len(list), len(ids))
 	}
 	for i := 1; i < len(list); i++ {
-		if list[i-1].ID >= list[i].ID {
+		if bytes.Compare(list[i-1].ID[:], list[i].ID[:]) >= 0 {
 			got := make([]CircuitID, 0, len(list))
 			for _, c := range list {
 				got = append(got, c.ID)
 			}
 			t.Fatalf("List() IDs = %v, want ascending order", got)
 		}
+	}
+}
+
+func TestCircuitManagerInsertCircuitLockedRejectsIDCollision(t *testing.T) {
+	m := NewCircuitManager(testManagerConfig())
+	id := testCircuitID(7)
+	first := &Circuit{ID: id}
+	if err := m.insertCircuitLocked(first); err != nil {
+		t.Fatalf("first insert returned error: %v", err)
+	}
+	second := &Circuit{ID: id}
+	if err := m.insertCircuitLocked(second); err == nil {
+		t.Fatal("expected error inserting a circuit with a colliding ID, got nil")
+	}
+	if got := m.circuits[id]; got != first {
+		t.Fatal("colliding insert replaced the original tracked circuit")
 	}
 }

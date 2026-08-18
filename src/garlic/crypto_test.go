@@ -9,11 +9,11 @@ func TestDeriveKeyIsDeterministic(t *testing.T) {
 	secret := []byte("shared secret material")
 	salt := []byte("salt")
 
-	k1, err := DeriveKey(secret, salt, LabelLayerKey)
+	k1, err := DeriveKey(secret, salt, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
-	k2, err := DeriveKey(secret, salt, LabelLayerKey)
+	k2, err := DeriveKey(secret, salt, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestDeriveKeyIsDeterministic(t *testing.T) {
 }
 
 func TestDeriveKeyProducesKeySizeBytes(t *testing.T) {
-	key, err := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, err := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
@@ -35,11 +35,11 @@ func TestDeriveKeyProducesKeySizeBytes(t *testing.T) {
 func TestDeriveKeyDiffersByLabel(t *testing.T) {
 	secret := []byte("shared secret material")
 
-	k1, err := DeriveKey(secret, nil, LabelLayerKey)
+	k1, err := DeriveKey(secret, nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
-	k2, err := DeriveKey(secret, nil, LabelCircuitKey)
+	k2, err := DeriveKey(secret, nil, LabelCircuitDataRecv)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
@@ -49,11 +49,11 @@ func TestDeriveKeyDiffersByLabel(t *testing.T) {
 }
 
 func TestDeriveKeyDiffersBySecret(t *testing.T) {
-	k1, err := DeriveKey([]byte("secret A"), nil, LabelLayerKey)
+	k1, err := DeriveKey([]byte("secret A"), nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
-	k2, err := DeriveKey([]byte("secret B"), nil, LabelLayerKey)
+	k2, err := DeriveKey([]byte("secret B"), nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestDeriveKeyDiffersBySecret(t *testing.T) {
 }
 
 func TestSealOpenRoundTrip(t *testing.T) {
-	key, err := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, err := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
@@ -84,8 +84,8 @@ func TestSealOpenRoundTrip(t *testing.T) {
 }
 
 func TestOpenRejectsWrongKey(t *testing.T) {
-	key1, _ := DeriveKey([]byte("secret A"), nil, LabelLayerKey)
-	key2, _ := DeriveKey([]byte("secret B"), nil, LabelLayerKey)
+	key1, _ := DeriveKey([]byte("secret A"), nil, LabelCircuitDataSend)
+	key2, _ := DeriveKey([]byte("secret B"), nil, LabelCircuitDataSend)
 
 	ciphertext, err := Seal(key1, 1, []byte("plaintext"), nil)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestOpenRejectsWrongKey(t *testing.T) {
 }
 
 func TestOpenRejectsWrongCounter(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 
 	ciphertext, err := Seal(key, 1, []byte("plaintext"), nil)
 	if err != nil {
@@ -109,7 +109,7 @@ func TestOpenRejectsWrongCounter(t *testing.T) {
 }
 
 func TestOpenRejectsTamperedCiphertext(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 
 	ciphertext, err := Seal(key, 1, []byte("plaintext"), nil)
 	if err != nil {
@@ -123,7 +123,7 @@ func TestOpenRejectsTamperedCiphertext(t *testing.T) {
 }
 
 func TestOpenRejectsMismatchedAAD(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 
 	ciphertext, err := Seal(key, 1, []byte("plaintext"), []byte("aad A"))
 	if err != nil {
@@ -147,7 +147,7 @@ func TestOpenRejectsInvalidKeySize(t *testing.T) {
 }
 
 func TestSealProducesDifferentCiphertextForDifferentCounters(t *testing.T) {
-	key, _ := DeriveKey([]byte("secret"), nil, LabelLayerKey)
+	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	plaintext := []byte("attack at dawn")
 
 	c1, err := Seal(key, 1, plaintext, nil)
@@ -222,11 +222,11 @@ func TestECDHOutputUsableWithDeriveKeyAndSeal(t *testing.T) {
 		t.Fatalf("ECDH returned error: %v", err)
 	}
 
-	aliceKey, err := DeriveKey(aliceShared, nil, LabelLayerKey)
+	aliceKey, err := DeriveKey(aliceShared, nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
-	bobKey, err := DeriveKey(bobShared, nil, LabelLayerKey)
+	bobKey, err := DeriveKey(bobShared, nil, LabelCircuitDataSend)
 	if err != nil {
 		t.Fatalf("DeriveKey returned error: %v", err)
 	}
@@ -242,5 +242,59 @@ func TestECDHOutputUsableWithDeriveKeyAndSeal(t *testing.T) {
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Errorf("Open() = %q, want %q", got, plaintext)
+	}
+}
+
+func TestDeriveLayerKeyIsTwoStageNotEqualToRawEstablishSecret(t *testing.T) {
+	ecdhSecret := []byte("a shared ECDH output")
+
+	establishSecret, err := DeriveKey(ecdhSecret, nil, LabelCircuitEstablish)
+	if err != nil {
+		t.Fatalf("DeriveKey returned error: %v", err)
+	}
+	dataKey, err := deriveLayerKey(ecdhSecret)
+	if err != nil {
+		t.Fatalf("deriveLayerKey returned error: %v", err)
+	}
+	if bytes.Equal(dataKey, establishSecret) {
+		t.Error("deriveLayerKey's output equals the intermediate establish-stage secret - the two stages collapsed into one")
+	}
+
+	wantDataKey, err := DeriveKey(establishSecret, nil, LabelCircuitDataSend)
+	if err != nil {
+		t.Fatalf("DeriveKey returned error: %v", err)
+	}
+	if !bytes.Equal(dataKey, wantDataKey) {
+		t.Error("deriveLayerKey does not match manually chaining DeriveKey(secret, EstablishLabel) then DeriveKey(that, DataSendLabel)")
+	}
+}
+
+func TestDeriveLayerKeyDeterministic(t *testing.T) {
+	ecdhSecret := []byte("a shared ECDH output")
+	k1, err := deriveLayerKey(ecdhSecret)
+	if err != nil {
+		t.Fatalf("deriveLayerKey returned error: %v", err)
+	}
+	k2, err := deriveLayerKey(ecdhSecret)
+	if err != nil {
+		t.Fatalf("deriveLayerKey returned error: %v", err)
+	}
+	if !bytes.Equal(k1, k2) {
+		t.Error("deriveLayerKey produced different keys for identical inputs")
+	}
+}
+
+func TestSendAndRecvDirectionLabelsProduceDifferentKeys(t *testing.T) {
+	establishSecret := []byte("an establishment-stage secret")
+	sendKey, err := DeriveKey(establishSecret, nil, LabelCircuitDataSend)
+	if err != nil {
+		t.Fatalf("DeriveKey returned error: %v", err)
+	}
+	recvKey, err := DeriveKey(establishSecret, nil, LabelCircuitDataRecv)
+	if err != nil {
+		t.Fatalf("DeriveKey returned error: %v", err)
+	}
+	if bytes.Equal(sendKey, recvKey) {
+		t.Error("send and recv direction labels produced the same key from the same establish secret - a reflected packet would decrypt under the wrong direction's key")
 	}
 }

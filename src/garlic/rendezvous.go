@@ -1,19 +1,21 @@
 package garlic
 
-// Rendezvous abstraction (Phase 9 of the roadmap, see
-// docs/garlic-architecture.md §3.9): endpoint discovery decoupled from
-// circuit construction, so circuits can be built and tested against a
-// StaticRendezvous without any distributed directory. A DHT-backed
-// implementation is future work behind the same interface.
+// Rendezvous abstraction (Phase 9 of the roadmap, extended by Part 3 of
+// the crypto hardening pass): endpoint discovery decoupled from circuit
+// construction. A Rendezvous implementation is untrusted storage/relay
+// - it can withhold, reorder, or serve a stale descriptor, but every
+// descriptor it hands back is independently verified by the caller
+// (VerifyServiceDescriptor, descriptor.go) before its IntroPoints are
+// trusted. A DHT-backed implementation is future work behind the same
+// interface.
 
 import (
 	"errors"
 	"sync"
-	"time"
 )
 
 // MaxIntroPoints bounds how many introduction points a single
-// publication may list, so a remote publisher can't make a Rendezvous
+// descriptor may list, so a remote publisher can't make a Rendezvous
 // implementation store unbounded per-GID state.
 const MaxIntroPoints = 16
 
@@ -30,56 +32,56 @@ type IntroPoint struct {
 	NodeKey []byte
 }
 
-// Rendezvous maps Garlic Service IDs (GID) to their current introduction
-// points.
+// Rendezvous maps Garlic Service IDs (GID) to their current signed
+// service descriptor.
 type Rendezvous interface {
-	// Publish advertises points as the introduction points for gid, valid
-	// for ttl. A later Publish for the same gid replaces the previous
-	// publication.
-	Publish(gid GID, points []IntroPoint, ttl time.Duration) error
-	// Lookup returns the currently-published introduction points for gid,
-	// or an error if none are published or the publication has expired.
-	Lookup(gid GID) ([]IntroPoint, error)
-}
-
-type staticEntry struct {
-	points    []IntroPoint
-	expiresAt time.Time
+	// Publish advertises descriptor as gid's current service descriptor.
+	// A later Publish for the same gid replaces the previous one.
+	Publish(gid GID, descriptor *ServiceDescriptor) error
+	// Lookup returns the currently-published descriptor for gid,
+	// unverified - the caller must run it through
+	// VerifyServiceDescriptor before trusting its IntroPoints. Returns
+	// ErrGIDNotFound if nothing has been published for gid.
+	Lookup(gid GID) (*ServiceDescriptor, error)
 }
 
 // StaticRendezvous is an in-memory Rendezvous implementation, suitable
 // for local testing and small statically-configured deployments
-// independent of any distributed directory. It is safe for concurrent
-// use.
+// independent of any distributed directory. It performs no verification
+// and no expiry enforcement of its own - see Lookup's doc comment; it
+// is deliberately as "dumb" as a real untrusted rendezvous would be, so
+// tests against it exercise the actual client-side trust boundary. It
+// is safe for concurrent use.
 type StaticRendezvous struct {
 	mu      sync.Mutex
-	entries map[GID]staticEntry
+	entries map[GID]*ServiceDescriptor
 }
 
 // NewStaticRendezvous returns an empty StaticRendezvous.
 func NewStaticRendezvous() *StaticRendezvous {
-	return &StaticRendezvous{entries: make(map[GID]staticEntry)}
+	return &StaticRendezvous{entries: make(map[GID]*ServiceDescriptor)}
 }
 
-func (s *StaticRendezvous) Publish(gid GID, points []IntroPoint, ttl time.Duration) error {
-	if len(points) > MaxIntroPoints {
+func (s *StaticRendezvous) Publish(gid GID, descriptor *ServiceDescriptor) error {
+	if len(descriptor.IntroPoints) > MaxIntroPoints {
 		return ErrTooManyIntroPoints
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[gid] = staticEntry{
-		points:    append([]IntroPoint(nil), points...),
-		expiresAt: time.Now().Add(ttl),
-	}
+	s.entries[gid] = descriptor
 	return nil
 }
 
-func (s *StaticRendezvous) Lookup(gid GID) ([]IntroPoint, error) {
+// Lookup returns whatever is currently stored for gid, including a
+// descriptor whose ExpiresAt has already passed - StaticRendezvous does
+// not check expiry itself (see the type's doc comment). Callers must
+// verify via VerifyServiceDescriptor.
+func (s *StaticRendezvous) Lookup(gid GID) (*ServiceDescriptor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.entries[gid]
-	if !ok || time.Now().After(e.expiresAt) {
+	d, ok := s.entries[gid]
+	if !ok {
 		return nil, ErrGIDNotFound
 	}
-	return append([]IntroPoint(nil), e.points...), nil
+	return d, nil
 }

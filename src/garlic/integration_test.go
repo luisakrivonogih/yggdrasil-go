@@ -154,15 +154,15 @@ func TestIntegrationSendGarlicThroughLegacyRelay(t *testing.T) {
 	}
 
 	capR := waitForCapability(t, gA, nodeR.PublicKey(), 180*time.Second)
-	if !capR.SupportsGarlicV1() {
-		t.Fatal("R's capability response does not advertise garlic-v1")
+	if !capR.SupportsGarlicV2() {
+		t.Fatal("R's capability response does not advertise garlic-v2")
 	}
 	if !bytes.Equal(capR.PublicKey, idR.PublicKey) {
 		t.Fatalf("R's advertised public key = %x, want %x", capR.PublicKey, idR.PublicKey)
 	}
 	capB := waitForCapability(t, gA, nodeB.PublicKey(), 180*time.Second)
-	if !capB.SupportsGarlicV1() {
-		t.Fatal("B's capability response does not advertise garlic-v1")
+	if !capB.SupportsGarlicV2() {
+		t.Fatal("B's capability response does not advertise garlic-v2")
 	}
 
 	circuitID, err := gA.CreateCircuit(

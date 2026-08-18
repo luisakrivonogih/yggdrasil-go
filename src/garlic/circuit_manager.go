@@ -6,7 +6,7 @@ package garlic
 // state just by being reachable.
 
 import (
-	"cmp"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"slices"
@@ -17,6 +17,7 @@ import (
 var (
 	ErrTooManyCircuits        = errors.New("garlic: too many circuits")
 	ErrTooManyCircuitsForPeer = errors.New("garlic: too many circuits through this peer")
+	ErrCircuitIDCollision     = errors.New("garlic: circuit ID collision")
 )
 
 // CircuitManagerConfig holds the DoS-relevant bounds for a CircuitManager.
@@ -48,6 +49,20 @@ func peerKeyOf(hops []Hop) string {
 	return hex.EncodeToString(hops[0].NodeKey)
 }
 
+// insertCircuitLocked inserts c into m.circuits if its ID is not
+// already tracked. Caller must hold m.mu. Separated from Add so the
+// collision path itself - vanishingly unlikely with a 128-bit random
+// ID, but not something to silently paper over if it ever happens - is
+// directly testable without needing to force randomCircuitID to
+// collide.
+func (m *CircuitManager) insertCircuitLocked(c *Circuit) error {
+	if _, exists := m.circuits[c.ID]; exists {
+		return ErrCircuitIDCollision
+	}
+	m.circuits[c.ID] = c
+	return nil
+}
+
 // Add builds a new circuit over hops and tracks it, subject to
 // MaxCircuits and MaxCircuitsPerPeer. On success the circuit counts
 // against both budgets until it is removed via Close or ExpireStale.
@@ -71,7 +86,9 @@ func (m *CircuitManager) Add(hops []Hop, lifetime time.Duration, maxPackets, max
 	if err != nil {
 		return nil, err
 	}
-	m.circuits[c.ID] = c
+	if err := m.insertCircuitLocked(c); err != nil {
+		return nil, err
+	}
 	m.perPeer[peer]++
 	return c, nil
 }
@@ -107,7 +124,7 @@ func (m *CircuitManager) List() []*Circuit {
 		list = append(list, c)
 	}
 	slices.SortFunc(list, func(a, b *Circuit) int {
-		return cmp.Compare(a.ID, b.ID)
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 	return list
 }

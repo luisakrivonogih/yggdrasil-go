@@ -82,7 +82,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 		return circuitAction{kind: actionDrop}
 	}
 
-	circuitID := CircuitID(env.CircuitID)
+	circuitID := env.CircuitID
 	window, ok := g.relayState.replayWindowFor(circuitID)
 	if !ok {
 		g.security.relayTableFull.Add(1)
@@ -98,7 +98,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
-	key, err := DeriveKey(secret, nil, LabelLayerKey)
+	key, err := deriveLayerKey(secret)
 	if err != nil {
 		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
@@ -115,6 +115,12 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 
 	if len(layer.NextHop) == 0 {
 		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner}
+	}
+	if len(layer.NextHopEphemeral) != KeySize {
+		// A well-formed intermediate layer always carries the next hop's
+		// ephemeral key; anything else is malformed or malicious input,
+		// treated identically to any other unforwardable message.
+		return circuitAction{kind: actionDrop}
 	}
 
 	nextEnv := &Envelope{
@@ -138,7 +144,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	}
 	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
 	forwardMsg = append(forwardMsg, msgTypeCircuitData)
-	forwardMsg = append(forwardMsg, ephemeralPub...)
+	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
 
 	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
@@ -198,7 +204,7 @@ func (g *Garlic) processCircuitDataBundle(body []byte) []circuitAction {
 // node advertises in response to a capability request. It performs no I/O.
 func (g *Garlic) processCapabilityRequest() []byte {
 	msg := &CapabilityMessage{
-		Versions:  []string{CapabilityGarlicV1},
+		Versions:  []string{CapabilityGarlicV2},
 		PublicKey: g.identity.PublicKey,
 	}
 	// A fixed, well-formed message built from this node's own identity

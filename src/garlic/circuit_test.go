@@ -2,14 +2,25 @@ package garlic
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 )
 
+// testCircuitID builds a distinguishable CircuitID for tests, encoding n
+// into the last 8 bytes so distinct small integers remain distinct
+// distinguishable IDs (the type itself carries no integer semantics -
+// production code only ever compares CircuitID for equality).
+func testCircuitID(n uint64) CircuitID {
+	var id CircuitID
+	binary.BigEndian.PutUint64(id[8:], n)
+	return id
+}
+
 func testHops(n int) []Hop {
 	hops := make([]Hop, n)
 	for i := range hops {
-		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelLayerKey)
+		key, _ := DeriveKey([]byte{byte(i)}, nil, LabelCircuitDataSend)
 		hops[i] = Hop{
 			NodeKey: []byte{byte('A' + i)},
 			Key:     key,
@@ -220,5 +231,19 @@ func TestCircuitIsClosedReflectsCloseCall(t *testing.T) {
 	c.Close()
 	if !c.IsClosed() {
 		t.Fatal("IsClosed() = false after Close(), want true")
+	}
+}
+
+func TestRandomCircuitIDsAreNotDuplicated(t *testing.T) {
+	ids := make(map[CircuitID]bool)
+	for i := 0; i < 1000; i++ {
+		id, err := randomCircuitID()
+		if err != nil {
+			t.Fatalf("randomCircuitID returned error: %v", err)
+		}
+		if ids[id] {
+			t.Fatalf("randomCircuitID produced a duplicate after %d draws", i)
+		}
+		ids[id] = true
 	}
 }

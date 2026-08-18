@@ -7,7 +7,7 @@ import (
 
 func TestCapabilityMessageMarshalUnmarshalRoundTrip(t *testing.T) {
 	m := &CapabilityMessage{
-		Versions:  []string{CapabilityGarlicV1, "garlic-v2-experimental"},
+		Versions:  []string{CapabilityGarlicV2, "garlic-v2-experimental"},
 		PublicKey: []byte("a 32-byte garlic public key!!!!"),
 	}
 	data, err := m.Marshal()
@@ -87,17 +87,17 @@ func TestUnmarshalCapabilityMessageRejectsVersionLengthExceedingBuffer(t *testin
 	}
 }
 
-func TestSupportsGarlicV1(t *testing.T) {
-	yes := &CapabilityMessage{Versions: []string{CapabilityGarlicV1}}
-	if !yes.SupportsGarlicV1() {
-		t.Error("SupportsGarlicV1() = false, want true")
+func TestSupportsGarlicV2(t *testing.T) {
+	yes := &CapabilityMessage{Versions: []string{CapabilityGarlicV2}}
+	if !yes.SupportsGarlicV2() {
+		t.Error("SupportsGarlicV2() = false, want true")
 	}
 	no := &CapabilityMessage{Versions: []string{"something-else"}}
-	if no.SupportsGarlicV1() {
-		t.Error("SupportsGarlicV1() = true, want false")
+	if no.SupportsGarlicV2() {
+		t.Error("SupportsGarlicV2() = true, want false")
 	}
 	empty := &CapabilityMessage{}
-	if empty.SupportsGarlicV1() {
-		t.Error("SupportsGarlicV1() on empty message = true, want false")
+	if empty.SupportsGarlicV2() {
+		t.Error("SupportsGarlicV2() on empty message = true, want false")
 	}
 }

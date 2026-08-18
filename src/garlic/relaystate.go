@@ -14,7 +14,7 @@ package garlic
 // sending traffic for new circuit IDs.
 
 import (
-	"cmp"
+	"bytes"
 	"slices"
 	"sync"
 	"time"
@@ -132,7 +132,7 @@ func (s *relayCircuitState) snapshot() []RelayCircuitInfo {
 		})
 	}
 	slices.SortFunc(out, func(a, b RelayCircuitInfo) int {
-		return cmp.Compare(a.ID, b.ID)
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 	return out
 }

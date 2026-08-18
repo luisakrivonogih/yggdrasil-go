@@ -298,15 +298,29 @@ func main() {
 	{
 		if cfg.Garlic.Enabled {
 			var identity *garlic.Identity
-			if len(cfg.Garlic.PrivateKey) > 0 {
+			switch {
+			case len(cfg.Garlic.PrivateKey) > 0 && len(cfg.Garlic.SigningPrivateKey) > 0:
+				if identity, err = garlic.LoadIdentityFromPrivateKeys(cfg.Garlic.PrivateKey, cfg.Garlic.SigningPrivateKey); err != nil {
+					panic(err)
+				}
+			case len(cfg.Garlic.PrivateKey) > 0:
+				// Upgrade path: a node that was already running Garlic
+				// before Garlic.SigningPrivateKey existed has
+				// Garlic.PrivateKey configured but not the new signing
+				// key. Keep the existing X25519 identity stable and
+				// generate only a fresh signing identity for this run -
+				// regenerating both would silently reset an already-
+				// stable Garlic identity on every restart, not just add
+				// a new one.
 				if identity, err = garlic.LoadIdentityFromPrivateKey(cfg.Garlic.PrivateKey); err != nil {
 					panic(err)
 				}
-			} else {
+				logger.Warnln("Garlic.PrivateKey configured but no Garlic.SigningPrivateKey - generated a fresh signing identity for this run only; your Garlic X25519 identity remains stable")
+			default:
 				if identity, err = garlic.NewIdentity(); err != nil {
 					panic(err)
 				}
-				logger.Warnln("No Garlic.PrivateKey configured - generated an ephemeral Garlic identity for this run only")
+				logger.Warnln("No Garlic.PrivateKey/SigningPrivateKey configured - generated ephemeral Garlic identity keys for this run only")
 			}
 			lifetime, err := time.ParseDuration(cfg.Garlic.CircuitLifetime)
 			if err != nil {

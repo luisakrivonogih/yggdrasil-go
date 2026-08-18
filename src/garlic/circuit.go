@@ -9,7 +9,6 @@ package garlic
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"sync"
 	"time"
@@ -30,7 +29,7 @@ var (
 
 // CircuitID identifies a circuit to the hops that make it up. It is
 // chosen at random by the circuit's creator.
-type CircuitID uint64
+type CircuitID [16]byte
 
 // Circuit is one Garlic circuit as seen by its originator: an ordered
 // path of hops with already-derived per-hop keys, plus expiry and
@@ -75,11 +74,11 @@ func NewCircuit(hops []Hop, lifetime time.Duration, maxPackets, maxBytes uint64)
 }
 
 func randomCircuitID() (CircuitID, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, err
+	var id CircuitID
+	if _, err := rand.Read(id[:]); err != nil {
+		return CircuitID{}, err
 	}
-	return CircuitID(binary.BigEndian.Uint64(b[:])), nil
+	return id, nil
 }
 
 // FirstHop returns the node key of the circuit's first hop.

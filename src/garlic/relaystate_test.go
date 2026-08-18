@@ -1,13 +1,14 @@
 package garlic
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
 
 func TestRelayCircuitStateCreatesWindowOnFirstUse(t *testing.T) {
 	s := newRelayCircuitState(1024)
-	w, ok := s.replayWindowFor(CircuitID(1))
+	w, ok := s.replayWindowFor(testCircuitID(1))
 	if !ok {
 		t.Fatal("replayWindowFor ok = false, want true")
 	}
@@ -18,8 +19,8 @@ func TestRelayCircuitStateCreatesWindowOnFirstUse(t *testing.T) {
 
 func TestRelayCircuitStateReturnsSameWindowForSameCircuit(t *testing.T) {
 	s := newRelayCircuitState(1024)
-	w1, _ := s.replayWindowFor(CircuitID(1))
-	w2, _ := s.replayWindowFor(CircuitID(1))
+	w1, _ := s.replayWindowFor(testCircuitID(1))
+	w2, _ := s.replayWindowFor(testCircuitID(1))
 	if w1 != w2 {
 		t.Error("replayWindowFor returned different windows for the same circuit ID")
 	}
@@ -35,17 +36,17 @@ func TestRelayCircuitStateReturnsSameWindowForSameCircuit(t *testing.T) {
 
 func TestRelayCircuitStateBoundedCapacity(t *testing.T) {
 	s := newRelayCircuitState(1)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
-	if _, ok := s.replayWindowFor(CircuitID(2)); ok {
+	if _, ok := s.replayWindowFor(testCircuitID(2)); ok {
 		t.Fatal("replayWindowFor(2) ok = true, want false (table at capacity)")
 	}
 }
 
 func TestRelayCircuitStateExpireStaleFreesCapacity(t *testing.T) {
 	s := newRelayCircuitState(1)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
 	time.Sleep(5 * time.Millisecond)
@@ -53,26 +54,26 @@ func TestRelayCircuitStateExpireStaleFreesCapacity(t *testing.T) {
 	if n := s.expireStale(time.Millisecond); n != 1 {
 		t.Fatalf("expireStale removed %d, want 1", n)
 	}
-	if _, ok := s.replayWindowFor(CircuitID(2)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(2)); !ok {
 		t.Fatal("replayWindowFor(2) after expireStale ok = false, want true (capacity freed)")
 	}
 }
 
 func TestRelayCircuitStateRecordForwardTracksHopsAndTraffic(t *testing.T) {
 	s := newRelayCircuitState(1024)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
-	s.recordForward(CircuitID(1), []byte("prev-hop"), []byte("next-hop"), 100)
-	s.recordForward(CircuitID(1), []byte("prev-hop"), []byte("next-hop"), 50)
+	s.recordForward(testCircuitID(1), []byte("prev-hop"), []byte("next-hop"), 100)
+	s.recordForward(testCircuitID(1), []byte("prev-hop"), []byte("next-hop"), 50)
 
 	snap := s.snapshot()
 	if len(snap) != 1 {
 		t.Fatalf("snapshot() returned %d entries, want 1", len(snap))
 	}
 	info := snap[0]
-	if info.ID != CircuitID(1) {
-		t.Fatalf("info.ID = %d, want 1", info.ID)
+	if info.ID != testCircuitID(1) {
+		t.Fatalf("info.ID = %x, want 1", info.ID)
 	}
 	if string(info.PreviousHop) != "prev-hop" || string(info.NextHop) != "next-hop" {
 		t.Fatalf("info.PreviousHop, NextHop = %q, %q, want \"prev-hop\", \"next-hop\"", info.PreviousHop, info.NextHop)
@@ -94,7 +95,7 @@ func TestRelayCircuitStateRecordForwardTracksHopsAndTraffic(t *testing.T) {
 func TestRelayCircuitStateRecordForwardIsNoOpForUntrackedCircuit(t *testing.T) {
 	s := newRelayCircuitState(1024)
 	// No replayWindowFor call first - this circuit was never admitted.
-	s.recordForward(CircuitID(99), []byte("prev"), []byte("next"), 10)
+	s.recordForward(testCircuitID(99), []byte("prev"), []byte("next"), 10)
 	if snap := s.snapshot(); len(snap) != 0 {
 		t.Fatalf("snapshot() = %+v, want empty (recordForward must not create untracked circuits)", snap)
 	}
@@ -109,10 +110,10 @@ func TestRelayCircuitStateSnapshotEmptyInitially(t *testing.T) {
 
 func TestRelayCircuitStateSnapshotOmitsExpiredEntries(t *testing.T) {
 	s := newRelayCircuitState(1)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
-	s.recordForward(CircuitID(1), []byte("prev"), []byte("next"), 10)
+	s.recordForward(testCircuitID(1), []byte("prev"), []byte("next"), 10)
 	time.Sleep(5 * time.Millisecond)
 	s.expireStale(time.Millisecond)
 
@@ -126,7 +127,7 @@ func TestRelayCircuitStateSnapshotOmitsUnconfirmedEntries(t *testing.T) {
 	// replayWindowFor reserves the entry before ECDH/decrypt has
 	// succeeded - this node's relay role for the circuit is not yet
 	// confirmed and it has no real previous/next hop to report.
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
 
@@ -141,7 +142,7 @@ func TestRelayCircuitStateSnapshotOmitsUnconfirmedEntries(t *testing.T) {
 	}
 
 	// Once the relay role is confirmed by an actual forward, it appears.
-	s.recordForward(CircuitID(1), []byte("prev"), []byte("next"), 10)
+	s.recordForward(testCircuitID(1), []byte("prev"), []byte("next"), 10)
 	if snap := s.snapshot(); len(snap) != 1 {
 		t.Fatalf("snapshot() after recordForward = %+v, want 1 entry", snap)
 	}
@@ -151,9 +152,13 @@ func TestRelayCircuitStateSnapshotIsSortedByCircuitID(t *testing.T) {
 	s := newRelayCircuitState(1024)
 	// Deliberately unsorted insertion order - a snapshot() that just
 	// ranged over the map would come back in Go's randomized order.
-	for _, id := range []CircuitID{9, 2, 7, 1, 40, 3} {
+	// testCircuitID encodes n into the trailing 8 bytes big-endian, so
+	// byte-wise comparison of the resulting [16]byte preserves numeric
+	// order.
+	for _, n := range []uint64{9, 2, 7, 1, 40, 3} {
+		id := testCircuitID(n)
 		if _, ok := s.replayWindowFor(id); !ok {
-			t.Fatalf("replayWindowFor(%d) ok = false, want true", id)
+			t.Fatalf("replayWindowFor(%x) ok = false, want true", id)
 		}
 		s.recordForward(id, []byte("prev"), []byte("next"), 10)
 	}
@@ -163,7 +168,7 @@ func TestRelayCircuitStateSnapshotIsSortedByCircuitID(t *testing.T) {
 		t.Fatalf("snapshot() returned %d entries, want 6", len(snap))
 	}
 	for i := 1; i < len(snap); i++ {
-		if snap[i-1].ID >= snap[i].ID {
+		if bytes.Compare(snap[i-1].ID[:], snap[i].ID[:]) >= 0 {
 			got := make([]CircuitID, 0, len(snap))
 			for _, e := range snap {
 				got = append(got, e.ID)
@@ -178,13 +183,58 @@ func TestRelayCircuitStateCountIncludesUnconfirmedEntriesForCapacity(t *testing.
 	// otherwise a peer could reserve unbounded entries that never get
 	// confirmed and never count against the bound.
 	s := newRelayCircuitState(1)
-	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+	if _, ok := s.replayWindowFor(testCircuitID(1)); !ok {
 		t.Fatal("replayWindowFor(1) ok = false, want true")
 	}
 	if n := s.count(); n != 1 {
 		t.Fatalf("count() = %d, want 1", n)
 	}
-	if _, ok := s.replayWindowFor(CircuitID(2)); ok {
+	if _, ok := s.replayWindowFor(testCircuitID(2)); ok {
 		t.Fatal("replayWindowFor(2) ok = true, want false (an unconfirmed entry still fills the table)")
+	}
+}
+
+func TestRelayCircuitStateDifferentCircuitsHaveIndependentReplayWindows(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	wA, _ := s.replayWindowFor(testCircuitID(1))
+	wB, _ := s.replayWindowFor(testCircuitID(2))
+
+	if !wA.CheckAndSet(5) {
+		t.Fatal("first CheckAndSet(5) on circuit A = false, want true")
+	}
+	// The same counter value on a *different* circuit ID must be
+	// unaffected - replay state is scoped per circuit, not global, so
+	// two circuits never accidentally share replay-window context.
+	if !wB.CheckAndSet(5) {
+		t.Fatal("CheckAndSet(5) on circuit B = false, want true (independent window from circuit A)")
+	}
+}
+
+// TestRelayCircuitStateEvictedWindowStartsFreshOnReuse documents the
+// deliberate bounded-memory tradeoff (Part 2 of the hardening task,
+// "replay cache eviction"): once a circuit's replay window has been
+// evicted (expireStale), a later message claiming that same circuit ID
+// gets a *fresh* window, not a resurrected one - this relay has no
+// memory of what counters it saw before eviction. This is expected
+// behavior of a capacity-bounded cache, not a defect - callers must not
+// assume eviction-proof replay protection.
+func TestRelayCircuitStateEvictedWindowStartsFreshOnReuse(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	id := testCircuitID(1)
+	w, _ := s.replayWindowFor(id)
+	if !w.CheckAndSet(5) {
+		t.Fatal("CheckAndSet(5) = false, want true")
+	}
+	time.Sleep(5 * time.Millisecond)
+	if n := s.expireStale(time.Millisecond); n != 1 {
+		t.Fatalf("expireStale removed %d, want 1", n)
+	}
+
+	w2, ok := s.replayWindowFor(id)
+	if !ok {
+		t.Fatal("replayWindowFor after eviction ok = false, want true")
+	}
+	if !w2.CheckAndSet(5) {
+		t.Fatal("CheckAndSet(5) on the post-eviction window = false, want true (a fresh window, not resurrected replay state)")
 	}
 }

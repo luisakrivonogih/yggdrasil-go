@@ -35,6 +35,13 @@ func TestGarlicConfigDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestGarlicConfigSigningPrivateKeyDefaultsEmpty(t *testing.T) {
+	cfg := GenerateConfig()
+	if len(cfg.Garlic.SigningPrivateKey) != 0 {
+		t.Error("Garlic.SigningPrivateKey is non-empty by default, want empty (generated fresh at startup until configured)")
+	}
+}
+
 func TestGarlicConfigPaddingAndJitterDefaults(t *testing.T) {
 	cfg := GenerateConfig()
 	if !cfg.Garlic.Padding.Enabled {
