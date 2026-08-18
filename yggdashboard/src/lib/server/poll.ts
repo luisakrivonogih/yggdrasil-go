@@ -41,12 +41,14 @@ export class Poller {
   private prevGarlicBytes: { originated: number; relayed: number; t: number } | null = null;
   private readyWaiters: Array<() => void> = [];
   private hasPolledOnce = false;
-  // Incremented on every tick() start and on every stop(). A tick only
-  // commits its result if this still matches the token it captured when
-  // it began - so a tick still in flight when stop() is called (or a
-  // slower, older tick superseded by a newer one that already started)
-  // never overwrites this.latest/this.history after the fact.
-  private tickToken = 0;
+  // True while a tick's requests are outstanding. A new interval fire is
+  // skipped entirely rather than racing the previous one - otherwise a
+  // poll cycle slower than intervalMs would pile requests up unboundedly
+  // in AdminClient's queue and never commit a result.
+  private inFlight = false;
+  // Set by stop(); a tick still in flight when stop() is called discards
+  // its result rather than writing this.latest/this.history after stop.
+  private stopped = false;
 
   constructor(client: AdminClient, intervalMs: number, historyWindowMs: number) {
     this.client = client;
@@ -56,6 +58,7 @@ export class Poller {
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     void this.tick();
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
   }
@@ -63,7 +66,7 @@ export class Poller {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.tickToken++;
+    this.stopped = true;
   }
 
   getSnapshot(): Snapshot {
@@ -88,80 +91,91 @@ export class Poller {
   }
 
   private async tick(): Promise<void> {
-    const token = ++this.tickToken;
+    // A previous tick's requests are still outstanding - skip this cycle
+    // entirely rather than pile more requests onto the admin socket.
+    if (this.inFlight) return;
+    this.inFlight = true;
+    try {
+      const [selfRes, peersRes, sessionsRes, treeRes, pathsRes] = await Promise.allSettled([
+        this.client.request<SelfInfo>('getSelf'),
+        this.client.request<{ peers: PeerEntry[] }>('getPeers'),
+        this.client.request<{ sessions: SessionEntry[] }>('getSessions'),
+        this.client.request<{ tree: TreeEntry[] }>('getTree'),
+        this.client.request<{ paths: PathEntry[] }>('getPaths')
+      ]);
+      const garlic = await this.pollGarlic();
 
-    const [selfRes, peersRes, sessionsRes, treeRes, pathsRes] = await Promise.allSettled([
-      this.client.request<SelfInfo>('getSelf'),
-      this.client.request<{ peers: PeerEntry[] }>('getPeers'),
-      this.client.request<{ sessions: SessionEntry[] }>('getSessions'),
-      this.client.request<{ tree: TreeEntry[] }>('getTree'),
-      this.client.request<{ paths: PathEntry[] }>('getPaths')
-    ]);
-    const garlic = await this.pollGarlic();
+      // stop() was called while this tick's requests were in flight -
+      // discard rather than write after stop.
+      if (this.stopped) return;
 
-    // This tick was superseded (stop() was called, or a newer tick
-    // already started) while the requests above were in flight - discard
-    // its result rather than write stale data over whatever's current.
-    if (token !== this.tickToken) return;
+      // Whether the admin socket was reachable *this* tick. Deliberately
+      // only the core calls: a Garlic failure just means Garlic is
+      // disabled on the node, which is normal and handled by pollGarlic.
+      const adminReachable = selfRes.status === 'fulfilled' || peersRes.status === 'fulfilled';
 
-    const self = selfRes.status === 'fulfilled' ? selfRes.value : this.latest.self;
-    const peers = peersRes.status === 'fulfilled' ? peersRes.value.peers : this.latest.peers;
-    const sessions = sessionsRes.status === 'fulfilled' ? sessionsRes.value.sessions : this.latest.sessions;
-    const tree = treeRes.status === 'fulfilled' ? treeRes.value.tree : this.latest.tree;
-    const paths = pathsRes.status === 'fulfilled' ? pathsRes.value.paths : this.latest.paths;
+      const self = selfRes.status === 'fulfilled' ? selfRes.value : this.latest.self;
+      const peers = peersRes.status === 'fulfilled' ? peersRes.value.peers : this.latest.peers;
+      const sessions = sessionsRes.status === 'fulfilled' ? sessionsRes.value.sessions : this.latest.sessions;
+      const tree = treeRes.status === 'fulfilled' ? treeRes.value.tree : this.latest.tree;
+      const paths = pathsRes.status === 'fulfilled' ? pathsRes.value.paths : this.latest.paths;
 
-    for (const [label, r] of [
-      ['getSelf', selfRes],
-      ['getPeers', peersRes],
-      ['getSessions', sessionsRes],
-      ['getTree', treeRes],
-      ['getPaths', pathsRes]
-    ] as const) {
-      if (r.status === 'rejected') {
-        console.error(`yggdashboard: poll request ${label} failed:`, r.reason);
+      for (const [label, r] of [
+        ['getSelf', selfRes],
+        ['getPeers', peersRes],
+        ['getSessions', sessionsRes],
+        ['getTree', treeRes],
+        ['getPaths', pathsRes]
+      ] as const) {
+        if (r.status === 'rejected') {
+          console.error(`yggdashboard: poll request ${label} failed:`, r.reason);
+        }
       }
-    }
 
-    const now = Date.now();
-    const rxRate = peers.reduce((sum, p) => sum + (p.rate_recvd ?? 0), 0);
-    const txRate = peers.reduce((sum, p) => sum + (p.rate_sent ?? 0), 0);
+      const now = Date.now();
+      const rxRate = peers.reduce((sum, p) => sum + (p.rate_recvd ?? 0), 0);
+      const txRate = peers.reduce((sum, p) => sum + (p.rate_sent ?? 0), 0);
 
-    let garlicRelayedRate = 0;
-    let garlicOriginatedRate = 0;
-    if (garlic.enabled && this.prevGarlicBytes) {
-      const elapsedSeconds = (now - this.prevGarlicBytes.t) / 1000;
-      if (elapsedSeconds > 0) {
-        garlicRelayedRate = Math.max(0, (garlic.stats.relayedBytes - this.prevGarlicBytes.relayed) / elapsedSeconds);
-        garlicOriginatedRate = Math.max(0, (garlic.stats.originatedBytes - this.prevGarlicBytes.originated) / elapsedSeconds);
+      let garlicRelayedRate = 0;
+      let garlicOriginatedRate = 0;
+      if (garlic.enabled && this.prevGarlicBytes) {
+        const elapsedSeconds = (now - this.prevGarlicBytes.t) / 1000;
+        if (elapsedSeconds > 0) {
+          garlicRelayedRate = Math.max(0, (garlic.stats.relayedBytes - this.prevGarlicBytes.relayed) / elapsedSeconds);
+          garlicOriginatedRate = Math.max(0, (garlic.stats.originatedBytes - this.prevGarlicBytes.originated) / elapsedSeconds);
+        }
       }
-    }
-    this.prevGarlicBytes = garlic.enabled
-      ? { originated: garlic.stats.originatedBytes, relayed: garlic.stats.relayedBytes, t: now }
-      : null;
+      this.prevGarlicBytes = garlic.enabled
+        ? { originated: garlic.stats.originatedBytes, relayed: garlic.stats.relayedBytes, t: now }
+        : null;
 
-    // Build a new array rather than mutating this.history in place - an
-    // older Snapshot returned by an earlier getSnapshot() call still
-    // holds a reference to the previous history array, and it must not
-    // silently gain elements or otherwise change after the fact.
-    const sample = { t: now, rxRate, txRate, garlicRelayedRate, garlicOriginatedRate };
-    this.history = [...this.history, sample].filter((s) => now - s.t <= this.historyWindowMs);
+      // Build a new array rather than mutating this.history in place - an
+      // older Snapshot returned by an earlier getSnapshot() call still
+      // holds a reference to the previous history array, and it must not
+      // silently gain elements or otherwise change after the fact.
+      const sample = { t: now, rxRate, txRate, garlicRelayedRate, garlicOriginatedRate };
+      this.history = [...this.history, sample].filter((s) => now - s.t <= this.historyWindowMs);
 
-    this.latest = {
-      self,
-      peers,
-      sessions,
-      tree,
-      paths,
-      garlic,
-      history: this.history,
-      polledAt: new Date(now).toISOString(),
-      ready: true
-    };
+      this.latest = {
+        self,
+        peers,
+        sessions,
+        tree,
+        paths,
+        garlic,
+        history: this.history,
+        polledAt: new Date(now).toISOString(),
+        ready: true,
+        adminReachable
+      };
 
-    if (!this.hasPolledOnce) {
-      this.hasPolledOnce = true;
-      const waiters = this.readyWaiters.splice(0);
-      for (const resolve of waiters) resolve();
+      if (!this.hasPolledOnce) {
+        this.hasPolledOnce = true;
+        const waiters = this.readyWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+      }
+    } finally {
+      this.inFlight = false;
     }
   }
 

@@ -19,6 +19,7 @@ vi.mock('$lib/server/instance', () => ({
       peers: [{ up: true }, { up: false }, { up: true }],
       garlic: { enabled: true },
       ready: true,
+      adminReachable: true,
       polledAt: '2026-08-10T00:00:00.000Z'
     }))
   }

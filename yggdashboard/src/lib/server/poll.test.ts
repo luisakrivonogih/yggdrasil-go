@@ -41,6 +41,7 @@ describe('Poller', () => {
 
     const snap = poller.getSnapshot();
     expect(snap.ready).toBe(true);
+    expect(snap.adminReachable).toBe(true);
     expect(snap.self.build_name).toBe('yggdrasil');
     expect(snap.peers).toHaveLength(1);
     expect(snap.garlic.enabled).toBe(true);
@@ -64,6 +65,9 @@ describe('Poller', () => {
     expect(calls).not.toContain('getGarlicIdentity');
     expect(calls).not.toContain('getGarlicCircuits');
     expect(calls).not.toContain('getGarlicKnownPeers');
+    // Garlic being disabled on the node is normal - it must never make
+    // the admin socket itself look unreachable.
+    expect(snap.adminReachable).toBe(true);
     poller.stop();
   });
 
@@ -218,5 +222,84 @@ describe('Poller', () => {
     const snap = poller.getSnapshot();
     expect(snap.ready).toBe(false);
     expect(snap.self.build_name).toBe('');
+  });
+
+  it('clears adminReachable when the socket dies, while ready stays true from the earlier successful poll', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const responses: Record<string, unknown> = { ...CORE_RESPONSES, ...GARLIC_RESPONSES };
+    const client = fakeClient(responses);
+    const poller = new Poller(client, 2000, 300000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getSnapshot().ready).toBe(true);
+    expect(poller.getSnapshot().adminReachable).toBe(true);
+
+    // The admin socket dies: every core call now rejects.
+    for (const name of ['getSelf', 'getPeers', 'getSessions', 'getTree', 'getPaths']) {
+      responses[name] = new Error('socket closed');
+    }
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const snap = poller.getSnapshot();
+    // The two fields are genuinely independent: `ready` still records
+    // that a poll completed once (stale data is being served), while
+    // `adminReachable` records that the *latest* tick reached nothing.
+    expect(snap.ready).toBe(true);
+    expect(snap.adminReachable).toBe(false);
+    // The stale data is still served rather than blanked.
+    expect(snap.self.build_name).toBe('yggdrasil');
+    expect(snap.peers).toHaveLength(1);
+
+    poller.stop();
+    errors.mockRestore();
+  });
+
+  it('skips a poll cycle instead of overlapping requests when a tick outlasts the interval', async () => {
+    let releaseGate: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const calls: string[] = [];
+    const client = {
+      request: vi.fn(async (name: string) => {
+        calls.push(name);
+        if (name === 'getSelf') await gate; // hold this tick past several intervals
+        if (name in GARLIC_RESPONSES) return (GARLIC_RESPONSES as Record<string, unknown>)[name];
+        return (CORE_RESPONSES as Record<string, unknown>)[name];
+      })
+    } as unknown as AdminClient;
+
+    const poller = new Poller(client, 1000, 300000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const countOf = (name: string) => calls.filter((c) => c === name).length;
+    expect(countOf('getSelf')).toBe(1); // the first tick's core calls went out
+
+    // Five intervals elapse while the first tick is still outstanding.
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // No second round of core requests was issued - the interval fires
+    // were skipped rather than queued behind the outstanding tick.
+    expect(countOf('getSelf')).toBe(1);
+    expect(countOf('getPeers')).toBe(1);
+    expect(countOf('getSessions')).toBe(1);
+    expect(countOf('getTree')).toBe(1);
+    expect(countOf('getPaths')).toBe(1);
+    expect(poller.getSnapshot().ready).toBe(false); // nothing committed yet
+
+    // And the skipping does not swallow the slow tick itself: once it
+    // finally completes, its result commits normally.
+    releaseGate!();
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    const snap = poller.getSnapshot();
+    expect(snap.ready).toBe(true);
+    expect(snap.adminReachable).toBe(true);
+    expect(snap.self.build_name).toBe('yggdrasil');
+    poller.stop();
   });
 });

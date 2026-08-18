@@ -195,8 +195,15 @@ func TestIntegrationSendGarlicThroughLegacyRelay(t *testing.T) {
 		t.Errorf("R's RelayedCircuits = %d, want 1", statsR.RelayedCircuits)
 	}
 	statsB := gB.GetStats()
-	if statsB.RelayedCircuits != 1 {
-		t.Errorf("B's RelayedCircuits = %d, want 1 (B still runs relay-side replay bookkeeping as the terminal hop)", statsB.RelayedCircuits)
+	// B is the terminal hop: it still runs relay-side replay bookkeeping
+	// (its relay-table entry exists and still occupies a capacity slot),
+	// but it never forwards a packet onward, so recordForward is never
+	// called for it and it has no real previous/next hop to report.
+	// relayCircuitState.snapshot deliberately excludes such entries
+	// rather than surfacing them as phantom relays with zero traffic, so
+	// the destination node reports no relayed circuits.
+	if statsB.RelayedCircuits != 0 {
+		t.Errorf("B's RelayedCircuits = %d, want 0 (B is the destination, not a relay - it never forwards)", statsB.RelayedCircuits)
 	}
 }
 

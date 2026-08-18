@@ -120,3 +120,71 @@ func TestRelayCircuitStateSnapshotOmitsExpiredEntries(t *testing.T) {
 		t.Fatalf("snapshot() after expireStale = %+v, want empty", snap)
 	}
 }
+
+func TestRelayCircuitStateSnapshotOmitsUnconfirmedEntries(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	// replayWindowFor reserves the entry before ECDH/decrypt has
+	// succeeded - this node's relay role for the circuit is not yet
+	// confirmed and it has no real previous/next hop to report.
+	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+		t.Fatal("replayWindowFor(1) ok = false, want true")
+	}
+
+	if snap := s.snapshot(); len(snap) != 0 {
+		t.Fatalf("snapshot() = %+v, want empty (a reserved-but-unconfirmed entry must not surface as a phantom relay)", snap)
+	}
+
+	// The reserved entry still occupies a real capacity slot - only the
+	// dashboard-facing snapshot excludes it, never the accounting.
+	if n := s.count(); n != 1 {
+		t.Fatalf("count() = %d, want 1 (a pending entry still counts against the capacity bound)", n)
+	}
+
+	// Once the relay role is confirmed by an actual forward, it appears.
+	s.recordForward(CircuitID(1), []byte("prev"), []byte("next"), 10)
+	if snap := s.snapshot(); len(snap) != 1 {
+		t.Fatalf("snapshot() after recordForward = %+v, want 1 entry", snap)
+	}
+}
+
+func TestRelayCircuitStateSnapshotIsSortedByCircuitID(t *testing.T) {
+	s := newRelayCircuitState(1024)
+	// Deliberately unsorted insertion order - a snapshot() that just
+	// ranged over the map would come back in Go's randomized order.
+	for _, id := range []CircuitID{9, 2, 7, 1, 40, 3} {
+		if _, ok := s.replayWindowFor(id); !ok {
+			t.Fatalf("replayWindowFor(%d) ok = false, want true", id)
+		}
+		s.recordForward(id, []byte("prev"), []byte("next"), 10)
+	}
+
+	snap := s.snapshot()
+	if len(snap) != 6 {
+		t.Fatalf("snapshot() returned %d entries, want 6", len(snap))
+	}
+	for i := 1; i < len(snap); i++ {
+		if snap[i-1].ID >= snap[i].ID {
+			got := make([]CircuitID, 0, len(snap))
+			for _, e := range snap {
+				got = append(got, e.ID)
+			}
+			t.Fatalf("snapshot() IDs = %v, want ascending order", got)
+		}
+	}
+}
+
+func TestRelayCircuitStateCountIncludesUnconfirmedEntriesForCapacity(t *testing.T) {
+	// A reserved-but-unconfirmed entry must still consume capacity,
+	// otherwise a peer could reserve unbounded entries that never get
+	// confirmed and never count against the bound.
+	s := newRelayCircuitState(1)
+	if _, ok := s.replayWindowFor(CircuitID(1)); !ok {
+		t.Fatal("replayWindowFor(1) ok = false, want true")
+	}
+	if n := s.count(); n != 1 {
+		t.Fatalf("count() = %d, want 1", n)
+	}
+	if _, ok := s.replayWindowFor(CircuitID(2)); ok {
+		t.Fatal("replayWindowFor(2) ok = true, want false (an unconfirmed entry still fills the table)")
+	}
+}

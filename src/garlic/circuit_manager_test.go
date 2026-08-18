@@ -183,3 +183,37 @@ func TestCircuitManagerListEmptyWhenNoCircuits(t *testing.T) {
 		t.Fatalf("List() = %+v, want empty", list)
 	}
 }
+
+func TestCircuitManagerListIsSortedByCircuitID(t *testing.T) {
+	m := NewCircuitManager(CircuitManagerConfig{MaxCircuits: 32, MaxCircuitsPerPeer: 32})
+	// Insert with deliberately unsorted IDs so a List() that just ranged
+	// over the map (Go randomizes map iteration order per call) would
+	// almost certainly come back out of order.
+	ids := []CircuitID{9, 2, 7, 1, 40, 3}
+	for i, id := range ids {
+		c, err := m.Add([]Hop{{NodeKey: []byte{byte(i)}}}, time.Minute, 100, 100000)
+		if err != nil {
+			t.Fatalf("Add returned error: %v", err)
+		}
+		// Re-key the tracked circuit under the chosen out-of-order ID.
+		m.mu.Lock()
+		delete(m.circuits, c.ID)
+		c.ID = id
+		m.circuits[id] = c
+		m.mu.Unlock()
+	}
+
+	list := m.List()
+	if len(list) != len(ids) {
+		t.Fatalf("List() returned %d circuits, want %d", len(list), len(ids))
+	}
+	for i := 1; i < len(list); i++ {
+		if list[i-1].ID >= list[i].ID {
+			got := make([]CircuitID, 0, len(list))
+			for _, c := range list {
+				got = append(got, c.ID)
+			}
+			t.Fatalf("List() IDs = %v, want ascending order", got)
+		}
+	}
+}

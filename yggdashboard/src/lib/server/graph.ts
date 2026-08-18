@@ -6,11 +6,11 @@ export function computeGraph(snap: Snapshot) {
     .filter((entry) => entry.parent !== '' && entry.parent !== entry.key)
     .map((entry) => ({ from: entry.key, to: entry.parent, type: 'yggdrasil' as const }));
 
-  const yggdrasilNodes = new Map<string, { key: string; address: string; isSelf: boolean }>();
+  const nodes = new Map<string, { key: string; address: string; isSelf: boolean }>();
   for (const entry of snap.tree) {
-    yggdrasilNodes.set(entry.key, { key: entry.key, address: entry.address, isSelf: entry.key === snap.self.key });
+    nodes.set(entry.key, { key: entry.key, address: entry.address, isSelf: entry.key === snap.self.key });
   }
-  yggdrasilNodes.set(snap.self.key, { key: snap.self.key, address: snap.self.address, isSelf: true });
+  nodes.set(snap.self.key, { key: snap.self.key, address: snap.self.address, isSelf: true });
 
   // Garlic circuit layer: originator's own chosen hop chain, and each
   // relayed circuit's real previous/next hop only - never a fabricated
@@ -27,8 +27,18 @@ export function computeGraph(snap: Snapshot) {
     garlicEdges.push({ from: snap.self.key, to: r.nextHop, type: 'garlic', circuitId: r.circuitId, active: true });
   }
 
+  // A Garlic circuit can reference a hop this node has no direct
+  // Yggdrasil peering with (e.g. a multi-hop originated circuit's
+  // middle/exit hop) - add any edge endpoint not already known from the
+  // tree, so no edge is ever drawn to a node that doesn't exist in the
+  // returned node list.
+  for (const e of garlicEdges) {
+    if (!nodes.has(e.from)) nodes.set(e.from, { key: e.from, address: '', isSelf: e.from === snap.self.key });
+    if (!nodes.has(e.to)) nodes.set(e.to, { key: e.to, address: '', isSelf: e.to === snap.self.key });
+  }
+
   return {
-    nodes: Array.from(yggdrasilNodes.values()),
+    nodes: Array.from(nodes.values()),
     yggdrasilEdges,
     garlicEdges,
     polledAt: snap.polledAt

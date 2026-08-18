@@ -14,14 +14,15 @@ export interface StatusPayload {
 /**
  * Derives the top-level node status from what this dashboard process
  * can actually observe: Online = at least one peer up, Degraded =
- * admin socket reachable but zero peers up, Disconnected = the poller
- * has never completed a successful poll at all. No invented health
- * checks beyond what's directly derivable from getSelf/getPeers.
+ * admin socket reachable but zero peers up, Disconnected = the most
+ * recent poll could not reach the admin socket at all (stale/cached
+ * data is being served, if any). No invented health checks beyond
+ * what's directly derivable from getSelf/getPeers.
  */
 export function computeStatus(snap: Snapshot): StatusPayload {
   const peersUp = snap.peers.filter((p) => p.up).length;
   let status: StatusPayload['status'];
-  if (!snap.ready) {
+  if (!snap.adminReachable) {
     status = 'disconnected';
   } else if (peersUp === 0) {
     status = 'degraded';

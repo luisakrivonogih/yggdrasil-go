@@ -6,8 +6,10 @@ package garlic
 // state just by being reachable.
 
 import (
+	"cmp"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 )
@@ -89,11 +91,14 @@ func (m *CircuitManager) Get(id CircuitID) (*Circuit, bool) {
 	return c, ok
 }
 
-// List returns a snapshot slice of every circuit currently tracked. The
-// returned slice is a copy of the map's contents at the time of the
-// call - safe to range over without holding m's lock, at the cost of
-// possibly being immediately stale (fine for the admin-facing snapshot
-// this exists for; nothing here is a hot path).
+// List returns a snapshot slice of every circuit currently tracked,
+// sorted by ascending circuit ID. The returned slice is a copy of the
+// map's contents at the time of the call - safe to range over without
+// holding m's lock, at the cost of possibly being immediately stale
+// (fine for the admin-facing snapshot this exists for; nothing here is
+// a hot path). The sort is what makes the admin/dashboard-facing
+// ordering stable: Go randomizes map iteration order per call, so
+// without it the dashboard's circuit table would reshuffle every poll.
 func (m *CircuitManager) List() []*Circuit {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,6 +106,9 @@ func (m *CircuitManager) List() []*Circuit {
 	for _, c := range m.circuits {
 		list = append(list, c)
 	}
+	slices.SortFunc(list, func(a, b *Circuit) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 	return list
 }
 

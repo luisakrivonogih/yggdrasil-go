@@ -12,6 +12,7 @@ package dashboard
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,13 +60,17 @@ func resolveEntryPoint(configured string) (string, error) {
 }
 
 // splitHostPort splits a "host:port" listen address into its parts for
-// the environment variables the dashboard process expects.
+// the environment variables the dashboard process expects. net's own
+// splitter (rather than a hand-rolled last-colon scan) is what makes
+// an IPv6 literal work: "[::1]:8080" must yield host "::1", not
+// "[::1]" - adapter-node's server.listen() can't bind the bracketed
+// form.
 func splitHostPort(listen string) (host, port string, err error) {
-	idx := bytes.LastIndexByte([]byte(listen), ':')
-	if idx < 0 {
-		return "", "", fmt.Errorf("dashboard: invalid listen address %q, want host:port", listen)
+	host, port, err = net.SplitHostPort(listen)
+	if err != nil {
+		return "", "", fmt.Errorf("dashboard: invalid listen address %q, want host:port: %w", listen, err)
 	}
-	return listen[:idx], listen[idx+1:], nil
+	return host, port, nil
 }
 
 // Process supervises the dashboard's Node.js child process.

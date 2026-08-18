@@ -45,6 +45,18 @@ func TestSplitHostPort(t *testing.T) {
 	}
 }
 
+func TestSplitHostPortStripsIPv6Brackets(t *testing.T) {
+	// adapter-node's server.listen() cannot bind the bracketed literal -
+	// HOST must be the bare address.
+	host, port, err := splitHostPort("[::1]:8080")
+	if err != nil {
+		t.Fatalf("splitHostPort returned error: %v", err)
+	}
+	if host != "::1" || port != "8080" {
+		t.Fatalf("host, port = %q, %q, want \"::1\", \"8080\"", host, port)
+	}
+}
+
 func TestSplitHostPortRejectsMissingColon(t *testing.T) {
 	if _, _, err := splitHostPort("notahostport"); err == nil {
 		t.Fatal("splitHostPort returned nil error, want an error")

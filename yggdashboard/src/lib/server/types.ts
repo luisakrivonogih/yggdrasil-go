@@ -155,6 +155,8 @@ export interface Snapshot {
   polledAt: string;
   /** False until the very first successful poll completes. */
   ready: boolean;
+  /** Whether the most recent poll tick could actually reach the admin socket at all (not falling back to stale/cached data). */
+  adminReachable: boolean;
 }
 
 export const EMPTY_SELF: SelfInfo = {
@@ -200,5 +202,6 @@ export const EMPTY_SNAPSHOT: Snapshot = {
   garlic: EMPTY_GARLIC,
   history: [],
   polledAt: '',
-  ready: false
+  ready: false,
+  adminReachable: false
 };

@@ -14,6 +14,8 @@ package garlic
 // sending traffic for new circuit IDs.
 
 import (
+	"cmp"
+	"slices"
 	"sync"
 	"time"
 )
@@ -102,13 +104,23 @@ func (s *relayCircuitState) recordForward(id CircuitID, previousHop, nextHop []b
 }
 
 // snapshot returns a point-in-time copy of every currently-tracked
-// relayed circuit.
+// relayed circuit that has actually relayed at least one packet -
+// replayWindowFor reserves an entry before ECDH/decrypt succeeds, so an
+// in-progress-but-not-yet-confirmed circuit is deliberately excluded
+// here rather than shown as a phantom relay with no real hop data. The
+// result is sorted by ascending circuit ID so the dashboard's relayed
+// list has a stable order across polls (Go randomizes map iteration
+// order per call). count() deliberately still counts the excluded
+// pending entries - they occupy real capacity slots.
 func (s *relayCircuitState) snapshot() []RelayCircuitInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	out := make([]RelayCircuitInfo, 0, len(s.circuits))
 	for id, info := range s.circuits {
+		if len(info.previousHop) == 0 {
+			continue
+		}
 		out = append(out, RelayCircuitInfo{
 			ID:             id,
 			PreviousHop:    append([]byte(nil), info.previousHop...),
@@ -119,6 +131,9 @@ func (s *relayCircuitState) snapshot() []RelayCircuitInfo {
 			BytesRelayed:   info.bytesRelayed,
 		})
 	}
+	slices.SortFunc(out, func(a, b RelayCircuitInfo) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 	return out
 }
 
