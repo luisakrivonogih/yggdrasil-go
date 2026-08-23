@@ -228,3 +228,14 @@ func TestLookupServiceRejectsBogusRendezvousResponse(t *testing.T) {
 		t.Fatal("expected LookupService to reject the bogus rendezvous response, got nil")
 	}
 }
+
+func TestProcessCapabilityRequestAdvertisesAutoCircuit(t *testing.T) {
+	g := newTestGarlic(t)
+	msg, err := UnmarshalCapabilityMessage(g.processCapabilityRequest())
+	if err != nil {
+		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
+	}
+	if !msg.SupportsAutoCircuit() {
+		t.Fatal("processCapabilityRequest() does not advertise CapabilityAutoCircuit")
+	}
+}

@@ -20,6 +20,17 @@ import "errors"
 // circuit hop or rendezvous point.
 const CapabilityGarlicV2 = "garlic-v2"
 
+// CapabilityAutoCircuit is advertised by a node whose code understands
+// the auto-pool wire path (msgTypeAnnounceRequest, msgTypeCircuitDataV3
+// - see protocol.go) - independent of whether this operator has chosen
+// to originate auto-pool circuits or cover traffic themselves
+// (Config.AutoPoolEnabled/CoverTrafficEnabled). Every position in an
+// auto-built circuit, not just the terminal hop, must advertise this
+// before being selected - see
+// docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §8 for why the compatibility argument requires gating every position.
+const CapabilityAutoCircuit = "garlic-v2-auto"
+
 const (
 	maxCapabilityVersions   = 16
 	maxCapabilityVersionLen = 32
@@ -47,6 +58,17 @@ type CapabilityMessage struct {
 func (m *CapabilityMessage) SupportsGarlicV2() bool {
 	for _, v := range m.Versions {
 		if v == CapabilityGarlicV2 {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsAutoCircuit reports whether the message advertises
+// CapabilityAutoCircuit.
+func (m *CapabilityMessage) SupportsAutoCircuit() bool {
+	for _, v := range m.Versions {
+		if v == CapabilityAutoCircuit {
 			return true
 		}
 	}

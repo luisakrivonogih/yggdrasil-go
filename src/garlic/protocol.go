@@ -208,7 +208,7 @@ func (g *Garlic) processCircuitDataBundle(body []byte) []circuitAction {
 // node advertises in response to a capability request. It performs no I/O.
 func (g *Garlic) processCapabilityRequest() []byte {
 	msg := &CapabilityMessage{
-		Versions:  []string{CapabilityGarlicV2},
+		Versions:  []string{CapabilityGarlicV2, CapabilityAutoCircuit},
 		PublicKey: g.identity.PublicKey,
 	}
 	// A fixed, well-formed message built from this node's own identity

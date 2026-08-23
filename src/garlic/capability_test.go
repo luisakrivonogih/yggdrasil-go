@@ -101,3 +101,14 @@ func TestSupportsGarlicV2(t *testing.T) {
 		t.Error("SupportsGarlicV2() on empty message = true, want false")
 	}
 }
+
+func TestSupportsAutoCircuit(t *testing.T) {
+	yes := &CapabilityMessage{Versions: []string{CapabilityGarlicV2, CapabilityAutoCircuit}}
+	if !yes.SupportsAutoCircuit() {
+		t.Fatal("SupportsAutoCircuit() = false, want true")
+	}
+	no := &CapabilityMessage{Versions: []string{CapabilityGarlicV2}}
+	if no.SupportsAutoCircuit() {
+		t.Fatal("SupportsAutoCircuit() = true, want false")
+	}
+}
