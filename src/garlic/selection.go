@@ -30,6 +30,7 @@ type HopCandidate struct {
 	GarlicPublicKey []byte
 	HopCount        int
 	TreeParent      []byte // this candidate's immediate parent in core.Core.GetTree(), if known
+	SelfVerified    bool   // mirrors DiscoveredPeer.SelfVerified - see discovery.go
 }
 
 // SelectDiversePath greedily selects n candidates from pool: sorted by

@@ -354,6 +354,49 @@ func TestIntegrationSelectPathAgainstRealTopology(t *testing.T) {
 	}
 }
 
+func TestIntegrationCandidatePoolCarriesSelfVerifiedThrough(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all) // A -- B
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0 // A and B are direct peers here (hop count 1), below the default distance filter
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	// A directly capability-queries B, which resolves a real mesh path
+	// AND records B as self-verified (Task 1/2's handleCapabilityResponse
+	// change).
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+
+	selected, err := gA.SelectPath(1)
+	if err != nil {
+		t.Fatalf("SelectPath returned error: %v", err)
+	}
+	if len(selected) != 1 || !selected[0].SelfVerified {
+		t.Fatalf("SelectPath(1) = %+v, want one self-verified candidate (B, directly queried by A)", selected)
+	}
+}
+
 // TestIntegrationMultipathSpreadsTraffic proves SendGarlicMultipath
 // actually delivers over two independent paths against a real mesh, not
 // just that circuitPool's round-robin index advances correctly in

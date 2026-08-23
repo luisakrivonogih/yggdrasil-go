@@ -167,7 +167,11 @@ func (g *Garlic) processAnnounce(body []byte) {
 		if len(p.NodeKey) == 0 || len(p.GarlicPublicKey) == 0 {
 			continue
 		}
-		g.discovery.record(DiscoveredPeer{NodeKey: p.NodeKey, GarlicPublicKey: p.GarlicPublicKey})
+		g.discovery.record(DiscoveredPeer{
+			NodeKey:         p.NodeKey,
+			GarlicPublicKey: p.GarlicPublicKey,
+			SelfVerified:    false,
+		})
 	}
 }
 

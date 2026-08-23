@@ -326,6 +326,7 @@ func (g *Garlic) candidatePool() []HopCandidate {
 			GarlicPublicKey: p.GarlicPublicKey,
 			HopCount:        hops,
 			TreeParent:      parentOf[string(p.NodeKey)],
+			SelfVerified:    p.SelfVerified,
 		})
 	}
 	return pool
@@ -414,7 +415,11 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 	// verification discovery candidates need before they're worth
 	// remembering - see discovery.go's doc comment.
 	if msg.SupportsGarlicV2() && len(msg.PublicKey) > 0 {
-		g.discovery.record(DiscoveredPeer{NodeKey: append([]byte(nil), from...), GarlicPublicKey: msg.PublicKey})
+		g.discovery.record(DiscoveredPeer{
+			NodeKey:         append([]byte(nil), from...),
+			GarlicPublicKey: msg.PublicKey,
+			SelfVerified:    true,
+		})
 	}
 
 	if ch != nil {
