@@ -1,6 +1,9 @@
 package garlic
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestSelectDiversePathPrefersFartherHops(t *testing.T) {
 	pool := []HopCandidate{
@@ -84,5 +87,71 @@ func TestSelectDiversePathUnknownParentsDoNotConflict(t *testing.T) {
 	}
 	if len(selected) != 2 {
 		t.Fatalf("got %d candidates, want 2", len(selected))
+	}
+}
+
+func TestSelectPathWithGuardPolicyFirstHopIsSelfVerified(t *testing.T) {
+	pool := []HopCandidate{
+		{NodeKey: []byte("gossiped-far"), HopCount: 10, SelfVerified: false},
+		{NodeKey: []byte("verified-near"), HopCount: 2, SelfVerified: true},
+	}
+	selected, err := SelectPathWithGuardPolicy(pool, 1, 0)
+	if err != nil {
+		t.Fatalf("SelectPathWithGuardPolicy returned error: %v", err)
+	}
+	if len(selected) != 1 || string(selected[0].NodeKey) != "verified-near" {
+		t.Fatalf("selected = %+v, want the self-verified candidate even though it has a lower hop count", selected)
+	}
+}
+
+func TestSelectPathWithGuardPolicyErrorsWithNoSelfVerified(t *testing.T) {
+	pool := []HopCandidate{
+		{NodeKey: []byte("gossiped-1"), HopCount: 10, SelfVerified: false},
+		{NodeKey: []byte("gossiped-2"), HopCount: 9, SelfVerified: false},
+	}
+	if _, err := SelectPathWithGuardPolicy(pool, 2, 0); !errors.Is(err, ErrNoSelfVerifiedCandidates) {
+		t.Fatalf("err = %v, want ErrNoSelfVerifiedCandidates", err)
+	}
+}
+
+func TestSelectPathWithGuardPolicyRemainingHopsFromFullPool(t *testing.T) {
+	pool := []HopCandidate{
+		{NodeKey: []byte("guard"), HopCount: 5, SelfVerified: true, TreeParent: []byte("p-guard")},
+		{NodeKey: []byte("gossiped-far"), HopCount: 8, SelfVerified: false, TreeParent: []byte("p-other")},
+	}
+	selected, err := SelectPathWithGuardPolicy(pool, 2, 0)
+	if err != nil {
+		t.Fatalf("SelectPathWithGuardPolicy returned error: %v", err)
+	}
+	if len(selected) != 2 || string(selected[0].NodeKey) != "guard" || string(selected[1].NodeKey) != "gossiped-far" {
+		t.Fatalf("selected = %+v, want [guard, gossiped-far] (second hop may be gossip-sourced)", selected)
+	}
+}
+
+func TestSelectPathWithGuardPolicySecondHopAvoidsGuardsTreeParent(t *testing.T) {
+	pool := []HopCandidate{
+		{NodeKey: []byte("guard"), HopCount: 5, SelfVerified: true, TreeParent: []byte("shared-parent")},
+		{NodeKey: []byte("sibling-of-guard"), HopCount: 9, SelfVerified: false, TreeParent: []byte("shared-parent")},
+		{NodeKey: []byte("diverse"), HopCount: 4, SelfVerified: false, TreeParent: []byte("other-parent")},
+	}
+	selected, err := SelectPathWithGuardPolicy(pool, 2, 0)
+	if err != nil {
+		t.Fatalf("SelectPathWithGuardPolicy returned error: %v", err)
+	}
+	if len(selected) != 2 || string(selected[1].NodeKey) != "diverse" {
+		t.Fatalf("selected = %+v, want second hop to skip the guard's tree-parent sibling", selected)
+	}
+}
+
+func TestSelectDiversePathStillWorksAfterRefactor(t *testing.T) {
+	// Regression: SelectDiversePath's own signature/behavior must be
+	// unchanged by the internal refactor this task makes.
+	pool := []HopCandidate{
+		{NodeKey: []byte("near"), HopCount: 1},
+		{NodeKey: []byte("far"), HopCount: 10},
+	}
+	selected, err := SelectDiversePath(pool, 1, 0)
+	if err != nil || len(selected) != 1 || string(selected[0].NodeKey) != "far" {
+		t.Fatalf("SelectDiversePath(pool, 1, 0) = %+v, %v; want [far], nil", selected, err)
 	}
 }
