@@ -28,6 +28,8 @@ The first byte of that payload is the **Garlic message type**
 | `0x03` | `msgTypeCircuitData` | One onion-routed packet; body is described in §4. |
 | `0x04` | `msgTypeAnnounce` | Gossip of known Garlic-capable peers; body is an `AnnounceMessage` (§8). |
 | `0x05` | `msgTypeCircuitDataBundle` | Several `msgTypeCircuitData`-shaped entries (real traffic mixed with cover entries) carried together; body is a `Bundle` (§7). |
+| `0x06` | `msgTypeAnnounceRequest` | Gossip *pull*: ask the recipient to immediately send back a `msgTypeAnnounce`. No body (§11.1). |
+| `0x07` | `msgTypeCircuitDataV3` | Auto-pool circuit data; wire-identical to `msgTypeCircuitData`, distinguished only by this type byte (§11.2). |
 
 Any other value, or an empty payload, is silently dropped by
 `Garlic.handleIncoming` — no error, no response, matching the "generic
@@ -390,6 +392,20 @@ what's observable on the wire:
   local segment. This is a heuristic, not Sybil resistance (see
   `docs/garlic-threat-model.md`'s Sybil section for what it does not
   solve).
+- `SelectPathWithGuardPolicy(pool, n, minHopCount)`
+  (`src/garlic/selection.go`) is `AutoCreateCircuit`'s (§11) hop-selection
+  policy: every `HopCandidate` now also carries a `SelfVerified` flag
+  (mirroring `DiscoveredPeer.SelfVerified` — true only if this node
+  itself completed a capability handshake with that peer, never a
+  gossip-only mention, and never downgraded back to false by a later
+  gossip mention once true). Hop 0 is chosen via `SelectDiversePath`
+  restricted to self-verified candidates only, returning
+  `ErrNoSelfVerifiedCandidates` if none exist; the remaining hops are
+  then chosen via `SelectDiversePath` over the full pool (self-verified
+  + gossiped), seeded so hop 1 can't share hop 0's tree parent either —
+  one continuous diversity guarantee spanning both stages, not two
+  independent ones. Nothing is pinned across calls: the first hop is
+  reselected fresh every call, unlike a Tor-style long-lived guard.
 - `Garlic.CreateCircuitPool`/`SendGarlicMultipath`
   (`src/garlic/multipath.go`) build several independent circuits and
   round-robin sends across them, so a given circuit's link carries only
@@ -397,7 +413,178 @@ what's observable on the wire:
   positioned on (or colluding across) only some of the pool's paths
   sees only that fraction.
 
-## 11. What this version does not define
+## 11. Auto-pool circuits: gossip pull and tagged delivery
+
+`src/garlic/manager.go`. Automatic circuit construction, rotation, and
+cover traffic (`Garlic.AutoCreateCircuit`, the background `autoPoolLoop`)
+are node-local behavior, not wire protocol, same as §10's `SelectPath` —
+but they're built on two wire additions that are: a gossip-pull request
+type, and a second circuit-data message type carrying a one-byte
+real/cover tag past the terminal hop's own layer decryption.
+
+### 11.1 `msgTypeAnnounceRequest` (gossip pull)
+
+Empty body. `Garlic.RequestGossip(peer)` sends it; on receipt,
+`Garlic.handleIncoming` immediately calls `g.GossipAnnounce(from)` — the
+existing `msgTypeAnnounce` push (§8), triggered on demand instead of
+waiting for the sender's own periodic `gossipTick`. This exists because
+`gossipTick` only pushes to peers already in this node's own
+`capabilityCache` (peers it has itself queried); a freshly bootstrapped
+node isn't in anyone *else's* `capabilityCache` yet, so without a pull it
+would have to wait for some other node to happen to query it first.
+
+Gated by the same per-peer `RateLimiter` every incoming Garlic message
+already goes through (`handleIncoming`'s `g.limiter.Allow(from)` check,
+before the type switch) — no additional rate limiting specific to this
+type. The `GossipAnnounce` reply it triggers is bounded to
+`Config.GossipSampleSize` entries (default 16), itself always well under
+`maxAnnouncePeers` (32, `discovery.go`) — the same fixed cap
+`AnnounceMessage.Marshal` enforces on any `msgTypeAnnounce` body,
+pull-triggered or not.
+
+`Config.BootstrapPeers` (hex-encoded node keys) drives this
+automatically: for each configured entry, `Garlic.bootstrap()` (run once,
+in its own goroutine, from `New`) retries `QueryCapability` up to
+`bootstrapMaxAttempts` (3) times and, on success, calls `RequestGossip` —
+the one manual step an operator performs, analogous to Yggdrasil's own
+`Peers` config, and what gives a node its first self-verified candidate
+(§10's `SelectPathWithGuardPolicy`) to build anything from at all.
+
+Like every other message type, `handleIncoming`'s type switch has no
+default case, so a peer running code without this feature simply never
+responds — §1's "any other value... is silently dropped" applies
+identically here, and no capability check or version negotiation was
+needed to add this type.
+
+### 11.2 `msgTypeCircuitDataV3`
+
+Wire-identical to `msgTypeCircuitData` (§4): the same
+`ephemeral_public_key || Envelope` body shape, the same per-hop key
+derivation (§4.1), the same `LayerPlaintext` layout (§4.2), the same
+relay decision logic. `Garlic.processCircuitData` handles both message
+types through one shared implementation, taking the inbound type byte as
+a `msgType` parameter so it knows which one it's processing — there is
+no separate cryptography or parsing path for this type, only a different
+outer byte and a different terminal-delivery destination.
+
+The two types exist to keep two circuit-tracking worlds separate without
+touching the manual API at all: `msgTypeCircuitData` underlies
+`SendGarlic`/`RecvGarlic`/`CreateCircuit`/the `createGarlicCircuit` admin
+RPC, unchanged. `msgTypeCircuitDataV3` is what `AutoCreateCircuit`-built
+circuits carry instead — both the origin's first send and every
+relay-to-relay forward — via `SendGarlicAuto`/`RecvGarlicAuto` and cover
+traffic (§11.3).
+
+**Forwarding preserves the inbound type byte.** §4.3's relay step 7 —
+rebuild the envelope, forward `msgType || next_hop_ephemeral ||
+new_envelope` to the next hop — uses whichever type byte the packet
+arrived as, never a hardcoded `msgTypeCircuitData`. A relay forwarding a
+`msgTypeCircuitDataV3` packet keeps forwarding it as
+`msgTypeCircuitDataV3` all the way to the terminal hop; the type is
+otherwise inert to every intermediate hop, which never inspects `Inner`
+regardless of which type it's relaying. This is proven directly:
+`TestProcessCircuitDataV3ForwardPreservesMessageType` and
+`TestProcessCircuitDataPlainForwardStillUsesPlainType`
+(`src/garlic/relay_logic_test.go`) each assert the forwarded packet's
+leading byte matches the type it arrived as.
+
+**Terminal delivery is where the two types diverge.** When
+`processCircuitData` recovers an empty `NextHop` (this node is the
+circuit's final hop), the resulting `circuitAction` carries a `tagged`
+field set to `msgType == msgTypeCircuitDataV3`. `Garlic.dispatchAction`
+routes a tagged delivery to `deliverTagged` instead of the plain
+`g.delivered` channel, which reads the delivered `Inner` as:
+
+```
+offset  size   field
+0       1      kind      (0 = autoPayloadKindReal, 1 = autoPayloadKindCover)
+1       ...    payload   (only meaningful when kind == autoPayloadKindReal)
+```
+
+- `kind == autoPayloadKindReal` (0): `Inner[1:]` is pushed to
+  `g.autoDelivered`, read by `RecvGarlicAuto`/the `recvGarlicAuto` admin
+  RPC — never `g.delivered`, so existing `RecvGarlic` callers are
+  structurally unaffected by anything in this section.
+- `kind == autoPayloadKindCover` (1), or an empty/malformed `Inner`:
+  dropped silently — no channel push, no error, no counter distinguishing
+  it from a legitimate delivery failure, matching this package's existing
+  "a drop is never explained further" convention (§1). Proven by
+  `TestProcessCircuitDataV3DeliverIsTagged`/
+  `TestProcessCircuitDataPlainDeliverIsNotTagged`.
+
+A `msgTypeCircuitData` (non-V3) delivery is entirely unaffected: `tagged`
+is simply `false`, and `dispatchAction` takes the existing `g.delivered`
+branch exactly as it did before this section's additions existed.
+
+### 11.3 Cover traffic (auto-pool only)
+
+When `Config.AutoPoolEnabled` and `Config.CoverTrafficEnabled` (default
+**on**), the `autoPoolLoop` background loop sends one
+`kind == autoPayloadKindCover` packet — `coverPayloadSize` (32) all-zero
+plaintext bytes, via `sendCoverTraffic`'s `make([]byte, coverPayloadSize)`
+(the AEAD ciphertext this produces is indistinguishable from random
+regardless of plaintext content, and per-hop wire size is independently
+re-randomized on top of this by `Config.PaddingEnabled` (§9), so an
+all-zero plaintext is sufficient — nothing about it is observable past
+the AEAD seal) — over every circuit currently in the auto-pool, on
+average every `Config.CoverTrafficInterval` (default 75s), jittered
+±50% so the interval itself isn't a fixed, fingerprintable period. Sent
+as ordinary, validly-encrypted `msgTypeCircuitDataV3` traffic, this
+travels the *full* circuit depth — indistinguishable in shape from real
+auto-pool traffic to every intermediate hop, and to the terminal hop too,
+right up until `deliverTagged`'s kind check discards it.
+
+This is a different mechanism from the pre-existing, opt-in-per-call
+`SendGarlicBundled` cover entries (§7), and necessarily so: a `Bundle`
+cover entry is random bytes with no valid ephemeral-key/ciphertext
+relationship, so it fails `DecryptLayer` (and is dropped) at whichever
+hop first attempts to decrypt it — always the circuit's first hop, since
+`SendGarlicBundled` addresses its bundle to `firstHop` and a forwarded
+bundle entry that *does* decrypt is unpacked and relayed onward as an
+ordinary single `msgTypeCircuitData` packet, not as a bundle. Bundling's
+cover volume therefore only ever appears on the origin→hop-1 link;
+links deeper in a circuit see none of it. Continuous auto-pool cover
+traffic needed to be real, validly-encrypted onion traffic that actually
+reaches the terminal hop and is discarded *there*, which is what
+`msgTypeCircuitDataV3`'s tagged delivery (§11.2) provides.
+
+### 11.4 `CapabilityAutoCircuit`
+
+`CapabilityGarlicV2` (§3) gates ordinary Garlic participation.
+`CapabilityAutoCircuit` (`capability.go`, value `"garlic-v2-auto"`) is a
+second, independent version string in the same
+`CapabilityMessage.Versions` list, gating whether a node's code
+understands the wire mechanics in §11.1/§11.2 —
+`CapabilityMessage.SupportsAutoCircuit()` mirrors the existing
+`SupportsGarlicV2()`.
+
+`processCapabilityRequest` (§3) advertises both strings unconditionally,
+for every node whose code includes this feature — advertising
+`CapabilityAutoCircuit` is **not** gated on `Config.AutoPoolEnabled` or
+`Config.CoverTrafficEnabled`. Those two config fields govern only
+whether *this* node chooses to originate auto-pool circuits or cover
+traffic itself; every Garlic-capable node already relays/forwards for
+other nodes' circuits regardless of what it personally originates (there
+is no "client-only mode" — see `docs/garlic-threat-model.md`'s
+"Intersection attacks" section), and `CapabilityAutoCircuit` states only
+that this node's relay/terminal-hop code can correctly handle a
+`msgTypeCircuitDataV3` packet if selected into someone else's circuit.
+
+`Garlic.AutoCreateCircuit` checks `SupportsAutoCircuit()` via a fresh
+`QueryCapability` round trip for **every** selected hop, not only the
+terminal one — a candidate missing it fails circuit construction with
+`ErrHopMissingAutoCircuitSupport`. This is stricter than strictly
+necessary for a purely-intermediate position (forwarding never inspects
+`Inner`, so even code that predates this feature would happen to forward
+a V3 packet correctly by accident) — but a legacy *terminal* hop would
+successfully decrypt its own layer, see `Inner` starting with an
+unexpected kind byte, and misdeliver or reject it under its own old
+code's expectations. Gating every position sidesteps needing to reason
+about which specific position is the risky one, and means only nodes
+that opted into running this feature's code ever see
+`msgTypeCircuitDataV3` traffic at all.
+
+## 12. What this version does not define
 
 - No wire format for circuit teardown/error signaling — a dead or
   uncooperative hop is currently only detected by the originator's own

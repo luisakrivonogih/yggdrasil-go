@@ -226,6 +226,14 @@ What's mitigated today, and what remains future work:
   circuit/path-length caps above: the amount of ECDH/AEAD work a single
   message can force is a function of `MaxPathLength`, not attacker-
   controlled input size.
+- **Gossip-pull amplification** (`msgTypeAnnounceRequest`,
+  `docs/garlic-protocol.md` §11.1) — answering a pull request costs this
+  node one outbound `GossipAnnounce`, itself bounded to
+  `Config.GossipSampleSize` entries (default 16), always well under
+  `maxAnnouncePeers` (32) — the same fixed cap that already bounds every
+  `msgTypeAnnounce` body. This is a small, fixed amplification factor per
+  request, gated by the same per-peer `RateLimiter` covering every other
+  incoming message type above, not a new unbounded-response category.
 
 **Future work, not currently implemented:**
 
@@ -292,8 +300,9 @@ guarantee.
 An adversary who can watch traffic at both the entry and exit of a
 circuit simultaneously can attempt classic timing/size correlation to
 confirm (not just suspect) that two observed flows are the same
-circuit. This project now has three independent mitigations engaged by
-default, each raising the cost of this attack without eliminating it:
+circuit. This project now has four independent mitigations against this
+attack, each raising its cost without eliminating it — some engaged by
+default, others available on request:
 
 - **Per-hop size re-randomization** (`Config.PaddingEnabled`,
   `docs/garlic-protocol.md` §9): breaks the naive "same size in and out
@@ -306,11 +315,28 @@ default, each raising the cost of this attack without eliminating it:
   queue is full under load — an adversary who can induce that load
   degrades this defense as a side effect.
 - **Cover traffic via bundling** (`SendGarlicBundled`,
-  `docs/garlic-protocol.md` §7): the strongest of the three, but
-  opt-in per call — a caller that never sets `coverCount > 0` gets none
-  of this benefit, and even with cover traffic, an adversary correlating
-  *volume* (not individual packet identity) across many bundles over
-  time is not addressed.
+  `docs/garlic-protocol.md` §7): opt-in per call — a caller that never
+  sets `coverCount > 0` gets none of this benefit, and even with cover
+  traffic, an adversary correlating *volume* (not individual packet
+  identity) across many bundles over time is not addressed. Chaff
+  entries are random bytes that fail decryption (and drop) at the
+  circuit's first hop, so this only ever adds cover volume on the
+  origin→hop-1 link — links deeper in the circuit see none of it.
+- **Auto-pool cover traffic** (`Config.CoverTrafficEnabled`, default
+  **on**, `docs/garlic-protocol.md` §11.3): a structurally different
+  mechanism from bundling, and default-on rather than opt-in — real,
+  validly-encrypted `msgTypeCircuitDataV3` traffic sent automatically
+  over every circuit in the auto-pool (when `Config.AutoPoolEnabled`),
+  which reaches the terminal hop and is discarded there
+  (`deliverTagged`), so unlike bundling it covers a circuit's full depth,
+  not just its first link. This is unrelated to, and does not require,
+  ever calling `SendGarlicBundled` — an operator who never touches the
+  bundling API still gets this cover traffic if auto-pool circuits are
+  running. It changes *reach and default*, not the *class* of guarantee:
+  still a real, fixed-size, jittered-interval cost rather than a formal
+  anonymity-set mechanism, and an adversary correlating volume across
+  many rotations of the pool over time is no more addressed by this than
+  by bundling.
 
 None of this amounts to a mixnet with formal anonymity-set guarantees.
 This is a standard limitation of onion routing without a dedicated
@@ -374,10 +400,27 @@ manipulate), but it does mean "diverse selection" is no longer purely
 aspirational — it exists and a caller must actively choose not to use
 it.
 
+`Garlic.AutoCreateCircuit` (`docs/garlic-protocol.md` §11), exposed as
+the `createGarlicCircuitAuto` admin RPC, goes further: it calls
+`SelectPathWithGuardPolicy` (§10) and
+`CreateCircuit` in one step, with no hop list for the caller to supply
+at all, and — when `Config.AutoPoolEnabled` is set — `autoPoolLoop` calls
+it automatically in the background with no caller present at all.
+`SelectPath` previously had exactly one caller, in a test; automatic,
+diverse selection is now materially easier to reach, and for an
+auto-pool-enabled node happens by default rather than by opt-in call.
+This still does not make it *mandatory*: the manual, explicit-hop-list
+`createGarlicCircuit` admin RPC is unchanged and remains available, and
+nothing prevents a caller from using it instead. Route manipulation
+itself is unaffected either way regardless of which of the three paths
+(manual list, `SelectPath` library call, or `AutoCreateCircuit`) built a
+given circuit — there is still no path-selection input an intermediate
+or remote party can inject into any of them.
+
 ## Sybil nodes
 
 An adversary running many Garlic-capable nodes can bias a naive
-path-selection strategy toward paths it controls end-to-end. Two real,
+path-selection strategy toward paths it controls end-to-end. Three real,
 partial mitigations now exist, alongside real remaining gaps:
 
 - **`SelectDiversePath`** (`docs/garlic-protocol.md` §10,
@@ -393,19 +436,45 @@ partial mitigations now exist, alongside real remaining gaps:
   whole conversation — it must control *every* path in the pool to
   reconstruct the full picture, which is strictly more expensive than
   controlling a single circuit.
+- **Self-verified/gossiped trust tiers with a first-hop guard policy**
+  (`docs/garlic-protocol.md` §10, `src/garlic/discovery.go`,
+  `src/garlic/selection.go`) — every discovered peer now carries a
+  `SelfVerified` flag: true only if this node itself completed a
+  capability handshake with it (`handleCapabilityResponse`), false for a
+  peer only ever heard about secondhand via gossip (`processAnnounce`);
+  `discoveryRegistry.record` never downgrades an existing `true` back to
+  `false` on a later secondhand mention. `SelectPathWithGuardPolicy`
+  (used by `AutoCreateCircuit`) restricts the first hop specifically to
+  self-verified candidates — falling back to `ErrNoSelfVerifiedCandidates`
+  if this node has none — while the remaining hops are still drawn from
+  the full pool (self-verified + gossiped), diversity-checked against the
+  guard's tree parent the same way `SelectDiversePath` already checks
+  candidates against each other. This narrows the specific case of an
+  adversary seeding a target's discovery pool with Sybil identities
+  purely through gossip and hoping one lands in the most sensitive
+  position, the first hop: a gossip-only Sybil can no longer become a
+  guard for this node's auto-built circuits without also being
+  personally capability-verified by it first.
 
-**What remains genuinely unmitigated:** neither mechanism has any
-concept of IP/ASN diversity or real-world operator identity — an
-adversary who deploys nodes with genuinely diverse tree positions (not
-sharing a tree parent, not close in hop count) defeats `SelectDiversePath`
-entirely, since tree position is the only signal available, and
-propagating a hop's real IP through gossip would itself be a privacy
-cost for relay operators (a deliberate design choice, not an oversight
-— see `docs/garlic-protocol.md` §8). There is no reputation system, no
-proof-of-work or other resource cost to registering as a Garlic node,
-and no mechanism that makes running many identities expensive. Treat
-Sybil resistance here as "raises the bar above picking uniformly at
-random or whatever answered first," not as solved.
+**What remains genuinely unmitigated:** neither `SelectDiversePath` nor
+the guard policy has any concept of IP/ASN diversity or real-world
+operator identity — an adversary who deploys nodes with genuinely
+diverse tree positions (not sharing a tree parent, not close in hop
+count) defeats `SelectDiversePath` entirely, since tree position is the
+only signal available, and propagating a hop's real IP through gossip
+would itself be a privacy cost for relay operators (a deliberate design
+choice, not an oversight — see `docs/garlic-protocol.md` §8). Self-
+verification is likewise not a resource cost: it only requires that a
+node answer a capability handshake, something any Sybil identity can do
+as cheaply as a legitimate one — becoming self-verified narrows *how* an
+adversary must attack (get personally verified by the target, not merely
+gossiped to it) without making that meaningfully harder to achieve than
+running one more node and waiting to be queried. There is no reputation
+system, no proof-of-work or other resource cost to registering as a
+Garlic node, and no mechanism that makes running many identities
+expensive. Treat Sybil resistance here as "raises the bar above picking
+uniformly at random or whatever answered first, and above being gossiped
+into the guard position specifically," not as solved.
 
 ## Intersection attacks
 
@@ -443,12 +512,12 @@ caller; nothing in this version enforces one.
 | Mesh-path intermediate node (not a chosen hop) | Same real-key-pair visibility as a malicious relay, for any hop-pair its position sits between - without ever being selected as a circuit hop |
 | Malicious introduction point | Sees GID lookups; payload only if also the terminal hop |
 | Malicious endpoint | Sees delivered payload (expected) and its own previous hop |
-| Malicious client (uninvolved remote peer) | Circuit-flood, oversized-length, deep-nesting, huge-bundle, and replay-cache-exhaustion vectors are bounded by fixed caps and a per-peer rate limiter, both fuzz/unit-test proven; no admission cost exists for acquiring a fresh peer identity, and the rate limiter shares one budget across all message types rather than specifically throttling circuit-creation churn |
+| Malicious client (uninvolved remote peer) | Circuit-flood, oversized-length, deep-nesting, huge-bundle, replay-cache-exhaustion, and gossip-pull-amplification vectors are bounded by fixed caps and a per-peer rate limiter, both fuzz/unit-test proven; no admission cost exists for acquiring a fresh peer identity, and the rate limiter shares one budget across all message types rather than specifically throttling circuit-creation churn |
 | Global passive adversary | Real capability - routing metadata (who talks to whom) is not encrypted at the ironwood network layer at all; per-hop padding/jitter/bundling (default on) raise the cost of correlation but do not defeat a patient, well-positioned adversary |
-| Traffic correlation | Raised cost via default-on per-hop size randomization and send jitter, plus opt-in cover traffic (`SendGarlicBundled`) - not a mixnet, statistical correlation over enough samples remains possible |
+| Traffic correlation | Raised cost via default-on per-hop size randomization and send jitter, plus cover traffic - opt-in per call via `SendGarlicBundled` (first-link only), or default-on for auto-pool circuits via `Config.CoverTrafficEnabled` (full circuit depth) - not a mixnet, statistical correlation over enough samples remains possible |
 | Active timing/watermark attacker | Not defended against - jitter only protects against a passive observer; an adversary that actively delays chosen packets to imprint a detectable pattern is unaffected by anything in this implementation |
 | Replay | Mitigated within the bounded replay window |
 | Packet tagging | Mitigated by AEAD authentication |
-| Route manipulation | N/A - no path-selection input an intermediate/remote party can inject either way; `SelectPath` is available but not mandatory |
-| Sybil | Partially mitigated - `SelectDiversePath` (tree-position diversity) and multipath pools raise the cost of the simplest strategies; no IP/ASN diversity, reputation, or resource-cost mechanism exists |
+| Route manipulation | N/A - no path-selection input an intermediate/remote party can inject either way; automatic selection (`SelectPath`, or now `AutoCreateCircuit`/`createGarlicCircuitAuto`) is available and materially easier to reach than before, but the manual `createGarlicCircuit` path is unchanged and neither is mandatory |
+| Sybil | Partially mitigated - `SelectDiversePath` (tree-position diversity), multipath pools, and a self-verified/gossiped trust split with a first-hop guard policy (`SelectPathWithGuardPolicy`) raise the cost of the simplest strategies; no IP/ASN diversity, reputation, or resource-cost mechanism exists, and self-verification itself costs an adversary nothing beyond answering a handshake |
 | Intersection attacks | Narrowed, not defeated - every node is structurally both a possible originator and a relay for others, so participation alone doesn't distinguish "this is my traffic" from "I'm relaying"; still erodable via traffic-correlation across sessions |
