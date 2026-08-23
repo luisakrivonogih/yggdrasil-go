@@ -26,7 +26,8 @@ const GARLIC_RESPONSES = {
   getGarlicStats: { originatedCircuits: 1, relayedCircuits: 0, originatedPackets: 0, originatedBytes: 0, relayedPackets: 0, relayedBytes: 0, security: { replayDrops: 0, malformedPackets: 0, expiredPackets: 0, authFailures: 0, relayTableFull: 0 } },
   getGarlicIdentity: { publicKey: 'garlic-pub' },
   getGarlicCircuits: { originated: [], relayed: [] },
-  getGarlicKnownPeers: { peers: [] }
+  getGarlicKnownPeers: { peers: [] },
+  getGarlicAutoPool: { pool: [] }
 };
 
 describe('Poller', () => {
@@ -68,6 +69,40 @@ describe('Poller', () => {
     // Garlic being disabled on the node is normal - it must never make
     // the admin socket itself look unreachable.
     expect(snap.adminReachable).toBe(true);
+    poller.stop();
+  });
+
+  it('includes autoPool from getGarlicAutoPool in the Garlic snapshot', async () => {
+    const client = fakeClient({
+      ...CORE_RESPONSES,
+      ...GARLIC_RESPONSES,
+      getGarlicAutoPool: { pool: [{ circuitId: 'c1', createdAt: '2026-08-10T00:00:00.000Z', hops: 3 }] }
+    });
+    const poller = new Poller(client, 2000, 300000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snap = poller.getSnapshot();
+    expect(snap.garlic.autoPool).toEqual([{ circuitId: 'c1', createdAt: '2026-08-10T00:00:00.000Z', hops: 3 }]);
+    poller.stop();
+  });
+
+  it('falls back to the last known autoPool when getGarlicAutoPool rejects, without affecting the rest of the Garlic snapshot', async () => {
+    const client = {
+      request: vi.fn(async (name: string) => {
+        if (name === 'getGarlicAutoPool') throw new Error('boom');
+        if (name in GARLIC_RESPONSES) return (GARLIC_RESPONSES as Record<string, unknown>)[name];
+        return (CORE_RESPONSES as Record<string, unknown>)[name];
+      })
+    } as unknown as AdminClient;
+    const poller = new Poller(client, 2000, 300000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snap = poller.getSnapshot();
+    expect(snap.garlic.autoPool).toEqual([]); // fell back to the empty initial snapshot's autoPool
+    expect(snap.garlic.enabled).toBe(true); // the rejected autoPool call doesn't affect the rest of Garlic
+    expect(snap.garlic.identity).toEqual({ publicKey: 'garlic-pub' });
     poller.stop();
   });
 

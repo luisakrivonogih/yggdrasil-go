@@ -13,6 +13,7 @@ import {
   type GarlicStats,
   type GarlicCircuits,
   type GarlicKnownPeer,
+  type GarlicAutoPoolEntry,
   type HistorySample
 } from './types';
 
@@ -27,7 +28,7 @@ import {
  * Garlic calls are tried as a group: if getGarlicStats fails (the admin
  * socket has no such handler at all when Garlic.Enabled is false on the
  * node), the whole Garlic snapshot for this tick is the explicit
- * disabled/zeroed shape, and the other three Garlic calls aren't even
+ * disabled/zeroed shape, and the other Garlic calls aren't even
  * attempted that tick - not treated as an error to log, just the normal
  * disabled state.
  */
@@ -187,10 +188,11 @@ export class Poller {
       return EMPTY_GARLIC;
     }
 
-    const [identityRes, circuitsRes, knownPeersRes] = await Promise.allSettled([
+    const [identityRes, circuitsRes, knownPeersRes, autoPoolRes] = await Promise.allSettled([
       this.client.request<GarlicIdentity>('getGarlicIdentity'),
       this.client.request<GarlicCircuits>('getGarlicCircuits'),
-      this.client.request<{ peers: GarlicKnownPeer[] }>('getGarlicKnownPeers')
+      this.client.request<{ peers: GarlicKnownPeer[] }>('getGarlicKnownPeers'),
+      this.client.request<{ pool: GarlicAutoPoolEntry[] }>('getGarlicAutoPool')
     ]);
 
     return {
@@ -198,7 +200,8 @@ export class Poller {
       identity: identityRes.status === 'fulfilled' ? identityRes.value : this.latest.garlic.identity,
       stats,
       circuits: circuitsRes.status === 'fulfilled' ? circuitsRes.value : this.latest.garlic.circuits,
-      knownPeers: knownPeersRes.status === 'fulfilled' ? knownPeersRes.value.peers : this.latest.garlic.knownPeers
+      knownPeers: knownPeersRes.status === 'fulfilled' ? knownPeersRes.value.peers : this.latest.garlic.knownPeers,
+      autoPool: autoPoolRes.status === 'fulfilled' ? autoPoolRes.value.pool : this.latest.garlic.autoPool
     };
   }
 }

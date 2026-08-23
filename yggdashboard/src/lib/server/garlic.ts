@@ -22,7 +22,13 @@ export function computeGarlic(snap: Snapshot) {
     knownPeers: snap.garlic.knownPeers.map((p) => ({
       nodeKey: p.nodeKey,
       garlicPublicKey: p.garlicPublicKey,
-      lastSeen: p.lastSeen
+      lastSeen: p.lastSeen,
+      selfVerified: p.selfVerified
+    })),
+    autoPool: snap.garlic.autoPool.map((c) => ({
+      circuitId: c.circuitId,
+      createdAt: c.createdAt,
+      hops: c.hops
     })),
     polledAt: snap.polledAt
   };

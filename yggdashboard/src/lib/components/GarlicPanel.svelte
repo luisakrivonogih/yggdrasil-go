@@ -3,9 +3,13 @@
   import CopyableKey from './CopyableKey.svelte';
   import MetricCard from './MetricCard.svelte';
   import SecurityCounters from './SecurityCounters.svelte';
-  import { formatBytes } from '$lib/format';
+  import { formatBytes, formatUptime } from '$lib/format';
 
   let { garlic }: { garlic: GarlicResponse } = $props();
+
+  function ageSeconds(createdAt: string, now: number): number {
+    return Math.max(0, (now - new Date(createdAt).getTime()) / 1000);
+  }
 </script>
 
 <div class="grid">
@@ -33,6 +37,32 @@
 
   <SecurityCounters counters={garlic.stats.security} />
 
+  <section class="auto-pool">
+    <h2>Auto-built circuit pool ({garlic.autoPool.length})</h2>
+    {#if garlic.autoPool.length === 0}
+      <p class="empty">No auto-built circuits yet.</p>
+    {:else}
+      <table>
+        <thead>
+          <tr>
+            <th>Circuit</th>
+            <th>Hops</th>
+            <th>Age</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each garlic.autoPool as c (c.circuitId)}
+            <tr>
+              <td><CopyableKey value={c.circuitId} prefixLen={6} suffixLen={4} /></td>
+              <td>{c.hops}</td>
+              <td>{formatUptime(ageSeconds(c.createdAt, Date.now()))}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  </section>
+
   <section class="known-peers">
     <h2>Known Garlic peers ({garlic.knownPeers.length})</h2>
     {#if garlic.knownPeers.length === 0}
@@ -44,6 +74,7 @@
             <th>Node key</th>
             <th>Garlic public key</th>
             <th>Last seen</th>
+            <th>Verified</th>
           </tr>
         </thead>
         <tbody>
@@ -52,6 +83,11 @@
               <td><CopyableKey value={p.nodeKey} /></td>
               <td><CopyableKey value={p.garlicPublicKey} /></td>
               <td>{new Date(p.lastSeen).toLocaleString()}</td>
+              <td>
+                <span class="verify-badge" class:verified={p.selfVerified}>
+                  {p.selfVerified ? 'Self-verified' : 'Gossiped'}
+                </span>
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -70,6 +106,7 @@
     margin-bottom: 1rem;
   }
   .identity,
+  .auto-pool,
   .known-peers {
     background: var(--bg-raised);
     border: 1px solid var(--border);
@@ -108,5 +145,13 @@
   .disabled-note {
     color: var(--text-dim);
     font-size: 0.85rem;
+  }
+  .verify-badge {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .verify-badge.verified {
+    color: var(--ok);
   }
 </style>

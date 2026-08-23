@@ -117,6 +117,14 @@ export interface GarlicKnownPeer {
   nodeKey: string;
   garlicPublicKey: string;
   lastSeen: string;
+  selfVerified: boolean;
+}
+
+export interface GarlicAutoPoolEntry {
+  circuitId: string;
+  /** RFC3339. */
+  createdAt: string;
+  hops: number;
 }
 
 /**
@@ -131,6 +139,7 @@ export interface GarlicSnapshot {
   stats: GarlicStats;
   circuits: GarlicCircuits;
   knownPeers: GarlicKnownPeer[];
+  autoPool: GarlicAutoPoolEntry[];
 }
 
 /** One historical sample of the live-updating metrics (Task 13). */
@@ -190,7 +199,8 @@ export const EMPTY_GARLIC: GarlicSnapshot = {
   identity: null,
   stats: EMPTY_GARLIC_STATS,
   circuits: { originated: [], relayed: [] },
-  knownPeers: []
+  knownPeers: [],
+  autoPool: []
 };
 
 export const EMPTY_SNAPSHOT: Snapshot = {
