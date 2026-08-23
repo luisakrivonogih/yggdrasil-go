@@ -344,6 +344,16 @@ func main() {
 			}
 			gcfg.MaxDiscoveredPeers = cfg.Garlic.MaxDiscoveredPeers
 			gcfg.MinHopCount = cfg.Garlic.MinHopCount
+			gcfg.BootstrapPeers = cfg.Garlic.BootstrapPeers
+			gcfg.AutoPoolEnabled = cfg.Garlic.AutoPoolEnabled
+			gcfg.AutoPoolSize = cfg.Garlic.AutoPoolSize
+			if gcfg.AutoRotationInterval, err = time.ParseDuration(cfg.Garlic.AutoRotationInterval); err != nil {
+				panic(fmt.Sprintf("invalid Garlic.AutoRotationInterval %q: %v", cfg.Garlic.AutoRotationInterval, err))
+			}
+			gcfg.CoverTrafficEnabled = cfg.Garlic.CoverTrafficEnabled
+			if gcfg.CoverTrafficInterval, err = time.ParseDuration(cfg.Garlic.CoverTrafficInterval); err != nil {
+				panic(fmt.Sprintf("invalid Garlic.CoverTrafficInterval %q: %v", cfg.Garlic.CoverTrafficInterval, err))
+			}
 			n.garlic = garlic.New(n.core, identity, gcfg, garlic.NewStaticRendezvous())
 			logger.Printf("Your Garlic public key is %s", hex.EncodeToString(identity.PublicKey))
 			if n.admin != nil {
