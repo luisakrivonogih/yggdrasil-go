@@ -2,6 +2,8 @@ package garlic
 
 import (
 	"bytes"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,5 +239,119 @@ func TestProcessCapabilityRequestAdvertisesAutoCircuit(t *testing.T) {
 	}
 	if !msg.SupportsAutoCircuit() {
 		t.Fatal("processCapabilityRequest() does not advertise CapabilityAutoCircuit")
+	}
+}
+
+func TestCoverTrafficStaggerIsBoundedAndIndependent(t *testing.T) {
+	g := newTestGarlic(t)
+	g.cfg.CoverTrafficInterval = 400 * time.Millisecond
+
+	seen := map[time.Duration]bool{}
+	for range 64 {
+		d := g.coverTrafficStagger()
+		if d < 0 || d >= g.cfg.CoverTrafficInterval {
+			t.Fatalf("coverTrafficStagger() = %v, want a value in [0, %v)", d, g.cfg.CoverTrafficInterval)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("coverTrafficStagger() returned %d distinct value(s) across 64 calls; offsets must be drawn independently, not shared", len(seen))
+	}
+}
+
+// addTestAutoPoolCircuit builds one real circuit through a freshly
+// generated hop identity, registers it with g's CircuitManager (and
+// g.originEphemeral, via CreateCircuit) and adds it to the auto-pool, so
+// sendAutoPayload can actually seal and hand a packet to g.scheduler.
+func addTestAutoPoolCircuit(t *testing.T, g *Garlic) CircuitID {
+	t.Helper()
+	hop, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	id, err := g.CreateCircuit(
+		[]CapabilityMessage{{Versions: []string{CapabilityGarlicV2, CapabilityAutoCircuit}, PublicKey: hop.PublicKey}},
+		[][]byte{hop.PublicKey},
+	)
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+	g.mu.Lock()
+	g.autoPool[id] = time.Now()
+	g.mu.Unlock()
+	return id
+}
+
+// TestSendCoverTrafficStaggersSendsAcrossTheInterval is the regression
+// test for the "one synchronized burst" finding: the previous
+// implementation looped over every pool circuit and sent immediately, so
+// an observer saw AutoPoolSize cover packets leave for AutoPoolSize
+// different first hops within one instant - itself a correlation signal
+// linking those circuits to a common originator. Sends must instead land
+// at independently drawn times spread across Config.CoverTrafficInterval.
+func TestSendCoverTrafficStaggersSendsAcrossTheInterval(t *testing.T) {
+	const (
+		circuits    = 8
+		interval    = 400 * time.Millisecond
+		minSpread   = 30 * time.Millisecond
+		collectSlop = 2 * time.Second
+	)
+
+	g := newTestGarlic(t)
+	g.cfg.CoverTrafficInterval = interval
+	g.cfg.JitterEnabled = false // isolate cover staggering from per-packet send jitter
+
+	var mu sync.Mutex
+	var sends []time.Time
+	g.scheduler = newJitterScheduler(func(_ []byte, _ net.Addr) error {
+		mu.Lock()
+		sends = append(sends, time.Now())
+		mu.Unlock()
+		return nil
+	}, 64, 8)
+	defer g.scheduler.Stop()
+
+	for range circuits {
+		addTestAutoPoolCircuit(t, g)
+	}
+
+	start := time.Now()
+	g.sendCoverTraffic()
+
+	deadline := time.Now().Add(interval + collectSlop)
+	for {
+		mu.Lock()
+		n := len(sends)
+		mu.Unlock()
+		if n == circuits || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mu.Lock()
+	got := append([]time.Time(nil), sends...)
+	mu.Unlock()
+
+	if len(got) != circuits {
+		t.Fatalf("observed %d cover sends, want %d", len(got), circuits)
+	}
+
+	first, last := got[0], got[0]
+	for _, ts := range got {
+		if ts.Before(first) {
+			first = ts
+		}
+		if ts.After(last) {
+			last = ts
+		}
+	}
+	if spread := last.Sub(first); spread < minSpread {
+		t.Fatalf("all %d cover sends landed within %v of each other, want them spread over at least %v across [0, %v) - they must not fire as one synchronized burst", circuits, spread, minSpread, interval)
+	}
+	// Every offset is drawn from [0, CoverTrafficInterval), so no send may
+	// straggle past the round it belongs to.
+	if late := last.Sub(start); late > interval+collectSlop {
+		t.Fatalf("last cover send landed %v after sendCoverTraffic, want within %v", late, interval)
 	}
 }

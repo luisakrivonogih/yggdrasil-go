@@ -898,6 +898,122 @@ func TestIntegrationAutoPoolRotatesOneCircuitAtATime(t *testing.T) {
 	}
 }
 
+// TestIntegrationAutoPoolPrunesExpiredCircuits is the regression test for
+// the auto-pool's most consequential failure mode: g.autoPool is a map
+// the auto-pool loop maintains itself, but circuits leave
+// CircuitManager on their own schedule - Config.CircuitLifetime, reaped
+// by CircuitManager.ExpireStale from cleanupLoop. Before pruning existed,
+// every size decision (fill, rotate-vs-fill, AutoPoolStatus) counted
+// those already-reaped entries as live, so the pool reported itself full
+// while holding nothing but phantom IDs, never backfilled, and cover
+// traffic over it silently failed with ErrCircuitNotFound forever.
+//
+// The reap is simulated with CloseCircuit rather than waited for:
+// CloseCircuit removes the circuit from CircuitManager exactly as
+// ExpireStale's _remove does - leaving g.autoPool's entry behind, which
+// is the whole bug - and cleanupLoop's real ExpireStale only runs on a
+// 30-second ticker, far too coarse to hang a test on. Config.
+// CircuitLifetime is still set short so the circuits really are past
+// their lifetime at that point, matching what ExpireStale would act on.
+//
+// Config.AutoRotationInterval is deliberately much longer than
+// Config.CircuitLifetime here, mirroring the shipped defaults (15m vs
+// 10m): rotation must not be what rescues the pool, so recovery below is
+// genuinely the expiry-driven backfill path.
+func TestIntegrationAutoPoolPrunesExpiredCircuits(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	const poolSize = 2
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = poolSize
+	cfgA.CircuitLifetime = 2 * time.Second
+	cfgA.AutoRotationInterval = 60 * time.Second // never fires during this test
+	cfgA.CoverTrafficEnabled = false
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	livePoolIDs := func() (entries []garlic.AutoPoolEntry, phantom []garlic.CircuitID) {
+		entries = gA.AutoPoolStatus()
+		tracked := map[garlic.CircuitID]bool{}
+		for _, c := range gA.OriginatedCircuits() {
+			tracked[c.ID] = true
+		}
+		for _, e := range entries {
+			if !tracked[e.ID] {
+				phantom = append(phantom, e.ID)
+			}
+		}
+		return entries, phantom
+	}
+
+	var filled []garlic.AutoPoolEntry
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		filled = gA.AutoPoolStatus()
+		if len(filled) == poolSize {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size %d; status: %+v", poolSize, filled)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Past the configured lifetime: every circuit built above is now
+	// expired and is exactly what ExpireStale would remove next.
+	time.Sleep(cfgA.CircuitLifetime + 500*time.Millisecond)
+	for _, e := range filled {
+		gA.CloseCircuit(e.ID)
+	}
+
+	// The direct assertion: the pool must not still be reporting the
+	// circuits that just left CircuitManager.
+	if entries, phantom := livePoolIDs(); len(phantom) != 0 {
+		t.Fatalf("AutoPoolStatus() reports %d circuit(s) no longer tracked by CircuitManager (%x); pool: %+v", len(phantom), phantom, entries)
+	}
+
+	// ...and, having correctly noticed it is below target, it must
+	// actually backfill rather than sitting empty until a rotation tick
+	// that is a full AutoRotationInterval away.
+	deadline = time.Now().Add(25 * time.Second)
+	for {
+		entries, phantom := livePoolIDs()
+		if len(entries) == poolSize && len(phantom) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool did not backfill to %d live circuits after its circuits were reaped; entries=%+v phantom=%x", poolSize, entries, phantom)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func TestIntegrationCoverTrafficNeverReachesRecvGarlicAuto(t *testing.T) {
 	nodeA := newLinkedTestNode(t)
 	nodeB := newLinkedTestNode(t)

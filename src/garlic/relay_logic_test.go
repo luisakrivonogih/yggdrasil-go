@@ -2,6 +2,8 @@ package garlic
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 	"time"
 )
@@ -68,9 +70,13 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 
 // newTestGarlic returns a *Garlic with just enough state set up to
 // exercise its pure relay-decision logic (processCircuitData,
-// processCapabilityRequest) - no real core.Core involved. The full
-// wiring to a running node is covered separately by the integration
-// tests, which construct a *Garlic via New.
+// processCapabilityRequest, handleCapabilityResponse) - no real core.Core
+// involved. The full wiring to a running node is covered separately by
+// the integration tests, which construct a *Garlic via New.
+//
+// The maps New would normally allocate are allocated here too, so a test
+// can seed them directly (e.g. g.pending, to stand in for a capability
+// request this node had genuinely sent) without tripping over a nil map.
 func newTestGarlic(t *testing.T) *Garlic {
 	t.Helper()
 	id, err := NewIdentity()
@@ -79,12 +85,19 @@ func newTestGarlic(t *testing.T) *Garlic {
 	}
 	cfg := DefaultConfig()
 	return &Garlic{
-		identity:   id,
-		cfg:        cfg,
-		circuits:   NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
-		relayState: newRelayCircuitState(1024),
-		delivered:  make(chan DeliveredMessage, 256),
-		discovery:  newDiscoveryRegistry(1024),
+		identity:        id,
+		cfg:             cfg,
+		circuits:        NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
+		relayState:      newRelayCircuitState(1024),
+		delivered:       make(chan DeliveredMessage, 256),
+		autoDelivered:   make(chan AutoDeliveredMessage, 256),
+		discovery:       newDiscoveryRegistry(1024),
+		capabilityCache: make(map[string]*CapabilityMessage),
+		pending:         make(map[string]chan *CapabilityMessage),
+		originEphemeral: make(map[CircuitID][]byte),
+		pools:           make(map[PoolID]*circuitPool),
+		autoPool:        make(map[CircuitID]time.Time),
+		stop:            make(chan struct{}),
 	}
 }
 
@@ -515,5 +528,90 @@ func TestProcessCapabilityRequestAdvertisesGarlicV2(t *testing.T) {
 	}
 	if !bytes.Equal(msg.PublicKey, g.identity.PublicKey) {
 		t.Errorf("response PublicKey = %x, want %x", msg.PublicKey, g.identity.PublicKey)
+	}
+}
+
+// capabilityResponseBody returns a well-formed, fully-capable
+// msgTypeCapabilityResponse body - i.e. the best-case input
+// handleCapabilityResponse can be handed, so a test asserting it is *not*
+// recorded as self-verified is isolating solicitation, nothing else.
+func capabilityResponseBody(t *testing.T, garlicPub []byte) []byte {
+	t.Helper()
+	body, err := (&CapabilityMessage{
+		Versions:  []string{CapabilityGarlicV2, CapabilityAutoCircuit},
+		PublicKey: garlicPub,
+	}).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	return body
+}
+
+func selfVerifiedFor(g *Garlic, nodeKey []byte) (found, selfVerified bool) {
+	for _, p := range g.discovery.list() {
+		if bytes.Equal(p.NodeKey, nodeKey) {
+			return true, p.SelfVerified
+		}
+	}
+	return false, false
+}
+
+func TestHandleCapabilityResponseSolicitedIsSelfVerified(t *testing.T) {
+	g := newTestGarlic(t)
+	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+
+	// Stand in for requestCapability having just sent a request to this
+	// exact key and still waiting on it.
+	g.pending[hex.EncodeToString(peerNode)] = make(chan *CapabilityMessage, 1)
+
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+
+	found, selfVerified := selfVerifiedFor(g, peerNode)
+	if !found {
+		t.Fatal("solicited capability response did not record a discovery entry at all")
+	}
+	if !selfVerified {
+		t.Error("SelfVerified = false for a response to a request this node had outstanding, want true")
+	}
+}
+
+// TestHandleCapabilityResponseUnsolicitedIsNotSelfVerified is the
+// regression test for the branch's headline anti-Sybil property: an
+// attacker who can open an ironwood session to this node can send a
+// msgTypeCapabilityResponse it was never asked for. If that were enough
+// to set SelfVerified, one unsolicited packet would permanently buy
+// first-hop-guard eligibility (discoveryRegistry.record never downgrades
+// SelfVerified), and SelectPathWithGuardPolicy's guarantee would be void.
+func TestHandleCapabilityResponseUnsolicitedIsNotSelfVerified(t *testing.T) {
+	g := newTestGarlic(t)
+	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+
+	// Deliberately no g.pending entry: this node never asked.
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+
+	if _, selfVerified := selfVerifiedFor(g, peerNode); selfVerified {
+		t.Fatal("SelfVerified = true for an unsolicited capability response; one unrequested packet must never grant first-hop-guard eligibility")
+	}
+}
+
+// A response that arrives after this node's own CapabilityTimeout already
+// gave up (requestCapability's deferred delete cleared g.pending) is
+// indistinguishable, from this function's perspective, from a wholly
+// unsolicited one - and must be treated the same way.
+func TestHandleCapabilityResponseAfterTimeoutIsNotSelfVerified(t *testing.T) {
+	g := newTestGarlic(t)
+	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+	key := hex.EncodeToString(peerNode)
+
+	g.pending[key] = make(chan *CapabilityMessage, 1)
+	delete(g.pending, key) // requestCapability's timeout path
+
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+
+	if _, selfVerified := selfVerifiedFor(g, peerNode); selfVerified {
+		t.Fatal("SelfVerified = true for a response that arrived after this node's request had already timed out, want false")
 	}
 }
