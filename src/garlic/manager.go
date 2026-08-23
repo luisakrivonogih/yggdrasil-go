@@ -198,6 +198,7 @@ type Garlic struct {
 	pending         map[string]chan *CapabilityMessage
 	originEphemeral map[CircuitID][]byte
 	pools           map[PoolID]*circuitPool
+	autoPool        map[CircuitID]time.Time
 
 	stop chan struct{}
 }
@@ -223,6 +224,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),
 		pools:           make(map[PoolID]*circuitPool),
+		autoPool:        make(map[CircuitID]time.Time),
 		stop:            make(chan struct{}),
 	}
 	g.scheduler = newJitterScheduler(func(data []byte, addr net.Addr) error {
