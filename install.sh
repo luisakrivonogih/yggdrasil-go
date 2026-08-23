@@ -24,6 +24,11 @@
 #                     (never touches a distro nodejs package), since the
 #                     systemd-managed yggdrasil execs `node` directly and
 #                     must find it on PATH.
+#   GARLIC_BOOTSTRAP_PEERS  comma-separated hex-encoded node keys of a few
+#                     known Garlic-capable peers, written into
+#                     Garlic.BootstrapPeers so this node's candidate pool
+#                     starts non-empty (default: empty - a freshly-installed
+#                     first node has nobody to bootstrap from yet).
 #
 # See docs/garlic-testing.md for how to actually exercise Garlic (build a
 # circuit, send/receive a payload) once this has installed and started it -
@@ -37,6 +42,7 @@ REPO_BRANCH=${REPO_BRANCH:-develop}
 WORKDIR=${WORKDIR:-/opt/yggdrasil-installer}
 ENABLE_GARLIC=${ENABLE_GARLIC:-1}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-1}
+GARLIC_BOOTSTRAP_PEERS=${GARLIC_BOOTSTRAP_PEERS:-}
 
 log() { echo "==> $*"; }
 die() { echo "error: $*" >&2; exit 1; }
@@ -228,7 +234,7 @@ if [ "$ENABLE_DASHBOARD" = "1" ]; then
 fi
 
 # ---- 10. Enable Garlic / the dashboard ----
-if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ]; then
+if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_BOOTSTRAP_PEERS" ]; then
   log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Dashboard=$ENABLE_DASHBOARD)"
   TMP_JSON="$WORKDIR/yggdrasil.json"
   mkdir -p "$WORKDIR"
@@ -238,11 +244,13 @@ if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ]; then
   if command -v jq >/dev/null 2>&1; then
     jq --argjson garlic "$([ "$ENABLE_GARLIC" = "1" ] && echo true || echo false)" \
        --argjson dash "$([ "$ENABLE_DASHBOARD" = "1" ] && echo true || echo false)" \
+       --arg bootstrap "$GARLIC_BOOTSTRAP_PEERS" \
        '.Garlic.Enabled = (if $garlic then true else .Garlic.Enabled end)
-        | .Dashboard.Enabled = (if $dash then true else .Dashboard.Enabled end)' \
+        | .Dashboard.Enabled = (if $dash then true else .Dashboard.Enabled end)
+        | .Garlic.BootstrapPeers = (if $bootstrap != "" then ($bootstrap | split(",")) else .Garlic.BootstrapPeers end)' \
        "$TMP_JSON" > "$TMP_JSON.new" && EDITED=1
   elif command -v python3 >/dev/null 2>&1; then
-    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$ENABLE_DASHBOARD" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
+    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$ENABLE_DASHBOARD" GARLIC_BOOTSTRAP_PEERS="$GARLIC_BOOTSTRAP_PEERS" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
@@ -250,6 +258,9 @@ if os.environ.get("ENABLE_GARLIC") == "1":
     cfg.setdefault("Garlic", {})["Enabled"] = True
 if os.environ.get("ENABLE_DASHBOARD") == "1":
     cfg.setdefault("Dashboard", {})["Enabled"] = True
+GARLIC_BOOTSTRAP_PEERS = os.environ.get("GARLIC_BOOTSTRAP_PEERS", "")
+if GARLIC_BOOTSTRAP_PEERS:
+    cfg.setdefault("Garlic", {})["BootstrapPeers"] = GARLIC_BOOTSTRAP_PEERS.split(",")
 json.dump(cfg, sys.stdout, indent=2)
 PY
   fi
@@ -262,7 +273,7 @@ PY
     systemctl restart yggdrasil
     log "Config updated, yggdrasil restarted"
   else
-    log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
+    log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and, if bootstrapping, \"Garlic\": { \"BootstrapPeers\": [...] }) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
   fi
 fi
 
