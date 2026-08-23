@@ -145,6 +145,35 @@ type DeliveredMessage struct {
 	Payload   []byte
 }
 
+// AutoDeliveredMessage is an application payload that arrived because
+// this node was the final hop of someone else's auto-pool circuit (see
+// AutoCreateCircuit). Kept entirely separate from DeliveredMessage/
+// g.delivered - a cover-traffic packet is silently discarded before it
+// ever reaches this type, and nothing sent via SendGarlicAuto ever
+// reaches the plain g.delivered/RecvGarlic path either.
+type AutoDeliveredMessage struct {
+	CircuitID CircuitID
+	Payload   []byte
+}
+
+// autoPayloadKindReal/autoPayloadKindCover are the leading byte of every
+// auto-pool circuit's Inner payload (see sendAutoPayload/deliverTagged) -
+// entirely internal to this node's own auto-pool traffic, invisible to
+// every intermediate hop (they never parse Inner) and meaningful only to
+// the terminal hop that decrypts it.
+const (
+	autoPayloadKindReal  byte = 0
+	autoPayloadKindCover byte = 1
+)
+
+// coverPayloadSize is the plaintext size of a cover packet's Inner
+// content before AEAD encryption. AEAD ciphertext is indistinguishable
+// from random regardless of plaintext content, and per-hop wire size is
+// independently re-randomized by Config.PaddingEnabled/PadToRandomRange
+// on top of this - a fixed small plaintext size is sufficient, no
+// crypto/rand needed here.
+const coverPayloadSize = 32
+
 // Garlic is one node's Garlic Routing Overlay state. Construct with New;
 // it registers itself with the given core.Core and is usable
 // immediately.
@@ -161,7 +190,8 @@ type Garlic struct {
 	discovery  *discoveryRegistry
 	security   SecurityCounters
 
-	delivered chan DeliveredMessage
+	delivered     chan DeliveredMessage
+	autoDelivered chan AutoDeliveredMessage
 
 	mu              sync.Mutex
 	capabilityCache map[string]*CapabilityMessage
@@ -188,6 +218,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		rendezvous:      rendezvous,
 		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers),
 		delivered:       make(chan DeliveredMessage, 256),
+		autoDelivered:   make(chan AutoDeliveredMessage, 256),
 		capabilityCache: make(map[string]*CapabilityMessage),
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),
@@ -397,6 +428,10 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 func (g *Garlic) dispatchAction(action circuitAction, from ed25519.PublicKey) {
 	switch action.kind {
 	case actionDeliver:
+		if action.tagged {
+			g.deliverTagged(action.circuitID, action.payload)
+			return
+		}
 		select {
 		case g.delivered <- DeliveredMessage{CircuitID: action.circuitID, Payload: action.payload}:
 		default:
@@ -404,6 +439,28 @@ func (g *Garlic) dispatchAction(action circuitAction, from ed25519.PublicKey) {
 	case actionForward:
 		g.relayState.recordForward(action.circuitID, from, action.forwardTo, len(action.forwardMsg))
 		g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
+	}
+}
+
+// deliverTagged interprets a msgTypeCircuitDataV3 delivery's leading kind
+// byte: a cover packet (autoPayloadKindCover) is silently discarded here
+// - the whole point of continuous cover traffic is that it travels the
+// full circuit depth and looks exactly like real traffic to every hop,
+// including this delivery step, right up until this one deliberate
+// discard. A malformed payload (empty, or an unrecognized kind byte) is
+// dropped the same way any other malformed Garlic input is - no error,
+// no observable difference from a legitimate cover discard.
+func (g *Garlic) deliverTagged(id CircuitID, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	kind, real := payload[0], payload[1:]
+	if kind != autoPayloadKindReal {
+		return
+	}
+	select {
+	case g.autoDelivered <- AutoDeliveredMessage{CircuitID: id, Payload: append([]byte(nil), real...)}:
+	default:
 	}
 }
 
@@ -780,6 +837,62 @@ func buildCircuitDataBody(ephemeralPub []byte, id CircuitID, counter, expiration
 func (g *Garlic) RecvGarlic(timeout time.Duration) (*DeliveredMessage, error) {
 	select {
 	case m := <-g.delivered:
+		return &m, nil
+	case <-time.After(timeout):
+		return nil, ErrRecvTimeout
+	}
+}
+
+// sendAutoPayload seals a kind-tagged payload (see autoPayloadKindReal/
+// autoPayloadKindCover) over circuit id and sends it as
+// msgTypeCircuitDataV3 - the shared plumbing behind both SendGarlicAuto
+// and the cover-traffic scheduler (Task 11). Mirrors SendGarlic's shape
+// exactly except for the tag byte and the V3 outer type.
+func (g *Garlic) sendAutoPayload(id CircuitID, kind byte, payload []byte) error {
+	c, ok := g.circuits.Get(id)
+	if !ok {
+		return ErrCircuitNotFound
+	}
+	g.mu.Lock()
+	ephemeralPub := g.originEphemeral[id]
+	g.mu.Unlock()
+	if ephemeralPub == nil {
+		return ErrCircuitNotFound
+	}
+
+	tagged := make([]byte, 0, 1+len(payload))
+	tagged = append(tagged, kind)
+	tagged = append(tagged, payload...)
+
+	onion, firstHop, counter, err := c.Seal(tagged)
+	if err != nil {
+		return err
+	}
+	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
+	body, err := buildCircuitDataBody(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	if err != nil {
+		return err
+	}
+
+	g.sendCircuitData(append([]byte{msgTypeCircuitDataV3}, body...), iwt.Addr(firstHop))
+	return nil
+}
+
+// SendGarlicAuto sends a real application payload over an auto-pool
+// circuit (previously created with AutoCreateCircuit). Delivered on the
+// remote end via RecvGarlicAuto/g.autoDelivered - never the plain
+// SendGarlic/RecvGarlic path, even if the same circuit ID were somehow
+// reused (it can't be - auto-pool and manual circuits are never the
+// same CircuitManager entry shared between the two APIs).
+func (g *Garlic) SendGarlicAuto(id CircuitID, payload []byte) error {
+	return g.sendAutoPayload(id, autoPayloadKindReal, payload)
+}
+
+// RecvGarlicAuto waits up to timeout for the next real (non-cover)
+// payload delivered to this node as an auto-pool circuit's final hop.
+func (g *Garlic) RecvGarlicAuto(timeout time.Duration) (*AutoDeliveredMessage, error) {
+	select {
+	case m := <-g.autoDelivered:
 		return &m, nil
 	case <-time.After(timeout):
 		return nil, ErrRecvTimeout

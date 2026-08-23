@@ -17,6 +17,7 @@ package garlic_test
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"io"
 	"net/url"
 	"testing"
@@ -594,6 +595,70 @@ func TestIntegrationSendGarlicBundledDeliversAmongCover(t *testing.T) {
 	// decrypt into a delivery.
 	if extra, err := gB.RecvGarlic(500 * time.Millisecond); err == nil {
 		t.Fatalf("unexpected second delivery: %+v", extra)
+	}
+}
+
+// TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips proves the
+// tagged auto-pool delivery path (SendGarlicAuto -> msgTypeCircuitDataV3
+// -> deliverTagged -> g.autoDelivered -> RecvGarlicAuto) round-trips a
+// real payload over a real mesh, and - just as importantly - that this
+// traffic never surfaces on B's plain RecvGarlic/g.delivered channel,
+// which the existing SendGarlic/RecvGarlic path uses instead.
+func TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	capB := waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+	if !capB.SupportsAutoCircuit() {
+		t.Fatal("B's capability response does not advertise CapabilityAutoCircuit")
+	}
+
+	circuitID, err := gA.CreateCircuit([]garlic.CapabilityMessage{*capB}, [][]byte{nodeB.PublicKey()})
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+
+	if err := gA.SendGarlicAuto(circuitID, []byte("auto-hello")); err != nil {
+		t.Fatalf("SendGarlicAuto returned error: %v", err)
+	}
+	msg, err := gB.RecvGarlicAuto(10 * time.Second)
+	if err != nil {
+		t.Fatalf("RecvGarlicAuto returned error: %v", err)
+	}
+	if string(msg.Payload) != "auto-hello" {
+		t.Fatalf("Payload = %q, want %q", msg.Payload, "auto-hello")
+	}
+	if msg.CircuitID != circuitID {
+		t.Fatalf("CircuitID = %x, want %x", msg.CircuitID, circuitID)
+	}
+
+	// Nothing sent via SendGarlicAuto should ever surface on B's plain
+	// RecvGarlic channel.
+	if _, err := gB.RecvGarlic(200 * time.Millisecond); !errors.Is(err, garlic.ErrRecvTimeout) {
+		t.Fatalf("RecvGarlic err = %v, want ErrRecvTimeout (auto-pool traffic must stay off the manual delivery channel)", err)
 	}
 }
 
