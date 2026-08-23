@@ -29,7 +29,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	mrand "math/rand"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -101,6 +103,29 @@ type Config struct {
 	// Yggdrasil's own NodeConfig.Peers. Best-effort: an unreachable
 	// bootstrap peer is simply skipped, not retried on a tight loop.
 	BootstrapPeers []string
+
+	// AutoPoolEnabled turns on the background circuit pool + rotation +
+	// (if CoverTrafficEnabled) cover traffic. A node can still relay/
+	// terminate for another node's auto-pool circuits with this off -
+	// see CapabilityAutoCircuit's doc comment.
+	AutoPoolEnabled bool
+	// AutoPoolSize is how many circuits the pool maintains.
+	AutoPoolSize int
+	// AutoRotationInterval is how often one pool circuit (the oldest) is
+	// retired and rebuilt - never the whole pool at once.
+	AutoRotationInterval time.Duration
+
+	// CoverTrafficEnabled sends a periodic dummy payload over every
+	// auto-pool circuit, even when there's nothing real to send - raises
+	// the cost of volume-based traffic correlation for auto-pool
+	// circuits specifically (docs/garlic-threat-model.md's "Traffic
+	// correlation" section already covers the general limits of this
+	// class of defense).
+	CoverTrafficEnabled bool
+	// CoverTrafficInterval is the average spacing between cover packets
+	// per circuit, randomized ±50% per send so it isn't perfectly
+	// periodic (a fixed interval is itself a fingerprint).
+	CoverTrafficInterval time.Duration
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -131,6 +156,11 @@ func DefaultConfig() Config {
 		GossipFanout:         2,
 		GossipSampleSize:     16,
 		MinHopCount:          2,
+		AutoPoolEnabled:      false,
+		AutoPoolSize:         3,
+		AutoRotationInterval: 15 * time.Minute,
+		CoverTrafficEnabled:  true,
+		CoverTrafficInterval: 75 * time.Second,
 	}
 }
 
@@ -245,6 +275,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 	c.SetGarlicHandler(g.handleIncoming)
 	go g.cleanupLoop()
 	go g.bootstrap()
+	go g.autoPoolLoop()
 	return g
 }
 
@@ -465,6 +496,210 @@ func (g *Garlic) AutoCreateCircuit(n int) (CircuitID, error) {
 		nodeKeys[i] = h.NodeKey
 	}
 	return g.CreateCircuit(path, nodeKeys)
+}
+
+// AutoPoolEntry is a point-in-time summary of one auto-pool circuit, for
+// the getGarlicAutoPool admin RPC / dashboard.
+type AutoPoolEntry struct {
+	ID        CircuitID
+	CreatedAt time.Time
+	HopCount  int
+}
+
+// AutoPoolStatus returns every circuit currently managed by the auto-pool
+// loop, sorted by ascending circuit ID for stable admin/dashboard output
+// (same reasoning as CircuitManager.List's doc comment).
+func (g *Garlic) AutoPoolStatus() []AutoPoolEntry {
+	g.mu.Lock()
+	entries := make([]AutoPoolEntry, 0, len(g.autoPool))
+	for id, at := range g.autoPool {
+		entries = append(entries, AutoPoolEntry{ID: id, CreatedAt: at})
+	}
+	g.mu.Unlock()
+
+	for i := range entries {
+		if c, ok := g.circuits.Get(entries[i].ID); ok {
+			entries[i].HopCount = len(c.HopKeys())
+		}
+	}
+	slices.SortFunc(entries, func(a, b AutoPoolEntry) int { return bytes.Compare(a.ID[:], b.ID[:]) })
+	return entries
+}
+
+// fillAutoPool tops the auto-pool up to Config.AutoPoolSize, best-effort:
+// a candidate shortage (ErrNoSelfVerifiedCandidates,
+// ErrInsufficientDiverseCandidates, or any AutoCreateCircuit failure)
+// just leaves the pool under target until more peers are discovered - no
+// tight retry loop.
+func (g *Garlic) fillAutoPool() {
+	g.mu.Lock()
+	n := len(g.autoPool)
+	g.mu.Unlock()
+	for ; n < g.cfg.AutoPoolSize; n++ {
+		id, err := g.AutoCreateCircuit(g.cfg.PathLength)
+		if err != nil {
+			return
+		}
+		g.mu.Lock()
+		g.autoPool[id] = time.Now()
+		g.mu.Unlock()
+	}
+}
+
+// rotateAutoPool retires exactly one pool circuit (the oldest) per call
+// and immediately tries to rebuild the pool back to target size - never
+// the whole pool at once, so a rotation tick isn't itself a
+// burst-of-circuit-builds fingerprint (see the design doc §7).
+func (g *Garlic) rotateAutoPool() {
+	g.mu.Lock()
+	var oldestID CircuitID
+	var oldestAt time.Time
+	first := true
+	for id, at := range g.autoPool {
+		if first || at.Before(oldestAt) {
+			oldestID, oldestAt, first = id, at, false
+		}
+	}
+	g.mu.Unlock()
+
+	if first {
+		g.fillAutoPool()
+		return
+	}
+
+	g.CloseCircuit(oldestID)
+	g.mu.Lock()
+	delete(g.autoPool, oldestID)
+	g.mu.Unlock()
+	g.fillAutoPool()
+}
+
+// sendCoverTraffic sends one autoPayloadKindCover packet over every
+// circuit currently in the auto-pool. Best-effort - a send failure
+// (e.g. a hop temporarily unreachable) is not retried here; the next
+// scheduled tick tries again.
+func (g *Garlic) sendCoverTraffic() {
+	g.mu.Lock()
+	ids := make([]CircuitID, 0, len(g.autoPool))
+	for id := range g.autoPool {
+		ids = append(ids, id)
+	}
+	g.mu.Unlock()
+
+	for _, id := range ids {
+		_ = g.sendAutoPayload(id, autoPayloadKindCover, make([]byte, coverPayloadSize))
+	}
+}
+
+// coverTrafficDelay returns Config.CoverTrafficInterval jittered ±50%,
+// so per-circuit cover-packet timing isn't a fixed, fingerprintable
+// period.
+func (g *Garlic) coverTrafficDelay() time.Duration {
+	base := g.cfg.CoverTrafficInterval
+	if base <= 0 {
+		return time.Second
+	}
+	jitterRange := int64(base) // ±50% of base = a uniform draw over [0.5*base, 1.5*base]
+	offset := mrand.Int63n(jitterRange) - jitterRange/2
+	d := time.Duration(int64(base) + offset)
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// autoPoolFillRetryInterval bounds how long autoPoolLoop waits before
+// retrying fillAutoPool while the pool is still below Config.AutoPoolSize
+// - deliberately decoupled from (and typically much shorter than)
+// Config.AutoRotationInterval, which governs the steady-state cadence
+// once the pool is already at target size. Without this, a freshly
+// started node whose very first fillAutoPool call races
+// bootstrap/discovery convergence (see bootstrapMaxAttempts's doc
+// comment for the same class of mesh-convergence race) and loses would
+// otherwise not retry again until a full AutoRotationInterval had
+// elapsed - 15 minutes with the default config - even though candidates
+// became available moments later. rotateAutoPool's "one circuit at a
+// time" anti-fingerprint concern (see its doc comment) is specifically
+// about steady-state rotation of an already-full pool; it doesn't apply
+// to simply catching a still-filling pool up to target, so a faster
+// cadence here doesn't undermine it.
+const autoPoolFillRetryInterval = 2 * time.Second
+
+// nextAutoPoolInterval picks how long autoPoolLoop should wait before its
+// next fill-or-rotate action: autoPoolFillRetryInterval while the pool is
+// below Config.AutoPoolSize, Config.AutoRotationInterval (floored at one
+// second) once it's already full. Read fresh every time the rotate/fill
+// timer fires (never on an unrelated loop wakeup - see autoPoolLoop),
+// since belowTarget can only change as a result of that same fire.
+func (g *Garlic) nextAutoPoolInterval() time.Duration {
+	g.mu.Lock()
+	belowTarget := len(g.autoPool) < g.cfg.AutoPoolSize
+	g.mu.Unlock()
+	interval := max(g.cfg.AutoRotationInterval, time.Second)
+	if belowTarget {
+		interval = min(interval, autoPoolFillRetryInterval)
+	}
+	return interval
+}
+
+// autoPoolLoop maintains the auto-pool (fill on start, then retry
+// filling on autoPoolFillRetryInterval until the pool reaches
+// Config.AutoPoolSize; once full, rotate one circuit at a time on
+// Config.AutoRotationInterval) and, if Config.CoverTrafficEnabled, sends
+// jittered cover traffic over every pool circuit. No-op entirely if
+// Config.AutoPoolEnabled is false - a node can still relay/terminate for
+// other nodes' auto-pool circuits without running this loop itself.
+//
+// The rotate/fill timer is created once and only ever Reset from within
+// its own case (never recreated on an unrelated wakeup, e.g. a cover-
+// traffic send): recreating it every loop iteration would restart its
+// countdown from zero each time the *other* timer fires first, and if
+// that other timer's period is shorter (as CoverTrafficInterval
+// routinely is versus autoPoolFillRetryInterval or a short
+// Config.AutoRotationInterval), the rotate/fill timer would starve and
+// never actually fire. coverTimer has no such requirement - each send's
+// delay is meant to be freshly rerolled anyway (see coverTrafficDelay) -
+// so it's fine, and simplest, to keep recreating it every iteration.
+func (g *Garlic) autoPoolLoop() {
+	if !g.cfg.AutoPoolEnabled {
+		return
+	}
+	g.fillAutoPool()
+
+	rotateTimer := time.NewTimer(g.nextAutoPoolInterval())
+	defer rotateTimer.Stop()
+
+	for {
+		var coverTimer *time.Timer
+		var coverC <-chan time.Time
+		if g.cfg.CoverTrafficEnabled {
+			coverTimer = time.NewTimer(g.coverTrafficDelay())
+			coverC = coverTimer.C
+		}
+
+		select {
+		case <-rotateTimer.C:
+			g.mu.Lock()
+			belowTarget := len(g.autoPool) < g.cfg.AutoPoolSize
+			g.mu.Unlock()
+			if belowTarget {
+				g.fillAutoPool()
+			} else {
+				g.rotateAutoPool()
+			}
+			rotateTimer.Reset(g.nextAutoPoolInterval())
+		case <-coverC:
+			g.sendCoverTraffic()
+		case <-g.stop:
+			if coverTimer != nil {
+				coverTimer.Stop()
+			}
+			return
+		}
+		if coverTimer != nil {
+			coverTimer.Stop()
+		}
+	}
 }
 
 // Identity returns this node's long-term Garlic identity.
