@@ -8,6 +8,7 @@ package garlic_test
 // appears.
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gologme/log"
 
@@ -65,6 +67,33 @@ func callAdmin(t *testing.T, sockPath, request string) map[string]interface{} {
 
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(map[string]interface{}{"request": request, "arguments": map[string]interface{}{}}); err != nil {
+		t.Fatalf("Encode returned error: %v", err)
+	}
+	var resp map[string]interface{}
+	dec := json.NewDecoder(conn)
+	if err := dec.Decode(&resp); err != nil {
+		t.Fatalf("Decode returned error: %v", err)
+	}
+	if resp["status"] != "success" {
+		t.Fatalf("admin request %q failed: %v", request, resp["error"])
+	}
+	respBody, _ := resp["response"].(map[string]interface{})
+	return respBody
+}
+
+// callAdminWithArgs behaves like callAdmin but sends a non-empty
+// arguments object - needed for handlers that take a required argument
+// (e.g. garlicGossipPull's "key").
+func callAdminWithArgs(t *testing.T, sockPath, request string, args map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Dial returned error: %v", err)
+	}
+	defer conn.Close()
+
+	enc := json.NewEncoder(conn)
+	if err := enc.Encode(map[string]interface{}{"request": request, "arguments": args}); err != nil {
 		t.Fatalf("Encode returned error: %v", err)
 	}
 	var resp map[string]interface{}
@@ -226,5 +255,184 @@ func TestGetSelfResponseHasNoPrivateKeyField(t *testing.T) {
 	}
 	if strings.Contains(string(body), "privateKey") || strings.Contains(string(body), "PrivateKey") {
 		t.Errorf("getSelf response contains a private key field: %s", body)
+	}
+}
+
+func TestCreateGarlicCircuitAutoHandlerDefaultsHopCountToPathLength(t *testing.T) {
+	cA := newLinkedTestNode(t)
+	defer cA.Stop()
+	cB := newLinkedTestNode(t)
+	defer cB.Stop()
+	connectChain(t, []*core.Core{cA, cB})
+	pumpAll([]*core.Core{cA, cB})
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0
+	cfg.PathLength = 1
+
+	gB := garlic.New(cB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gA := garlic.New(cA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	waitForCapability(t, gA, cB.PublicKey(), 60*time.Second)
+
+	sockPath := newTestAdminSocket(t, cA, gA)
+	resp := callAdmin(t, sockPath, "createGarlicCircuitAuto")
+	if id, _ := resp["circuitId"].(string); id == "" {
+		t.Fatalf("createGarlicCircuitAuto response = %+v, want a non-empty circuitId", resp)
+	}
+}
+
+func TestGetGarlicAutoPoolHandlerListsPool(t *testing.T) {
+	cA := newLinkedTestNode(t)
+	defer cA.Stop()
+	cB := newLinkedTestNode(t)
+	defer cB.Stop()
+	connectChain(t, []*core.Core{cA, cB})
+	pumpAll([]*core.Core{cA, cB})
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(cB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(cB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = 1
+	cfgA.CoverTrafficEnabled = false
+	gA := garlic.New(cA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for len(gA.AutoPoolStatus()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("auto-pool never reached target size 1")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	sockPath := newTestAdminSocket(t, cA, gA)
+	resp := callAdmin(t, sockPath, "getGarlicAutoPool")
+	pool, ok := resp["pool"].([]interface{})
+	if !ok || len(pool) != 1 {
+		t.Fatalf("getGarlicAutoPool response pool = %+v, want 1 entry", resp["pool"])
+	}
+}
+
+func TestGetGarlicKnownPeersHandlerIncludesSelfVerified(t *testing.T) {
+	cA := newLinkedTestNode(t)
+	defer cA.Stop()
+	cB := newLinkedTestNode(t)
+	defer cB.Stop()
+	connectChain(t, []*core.Core{cA, cB})
+	pumpAll([]*core.Core{cA, cB})
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(cB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gA := garlic.New(cA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	waitForCapability(t, gA, cB.PublicKey(), 60*time.Second)
+
+	sockPath := newTestAdminSocket(t, cA, gA)
+	resp := callAdmin(t, sockPath, "getGarlicKnownPeers")
+	peers, ok := resp["peers"].([]interface{})
+	if !ok || len(peers) != 1 {
+		t.Fatalf("getGarlicKnownPeers response peers = %+v, want 1 entry", resp["peers"])
+	}
+	entry, ok := peers[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("peers[0] = %#v, want a JSON object", peers[0])
+	}
+	if sv, ok := entry["selfVerified"].(bool); !ok || !sv {
+		t.Fatalf("peers[0][\"selfVerified\"] = %v, want true", entry["selfVerified"])
+	}
+}
+
+func TestGarlicGossipPullHandlerTriggersRequestGossip(t *testing.T) {
+	cA := newLinkedTestNode(t)
+	defer cA.Stop()
+	cB := newLinkedTestNode(t)
+	defer cB.Stop()
+	cC := newLinkedTestNode(t)
+	defer cC.Stop()
+	connectChain(t, []*core.Core{cA, cB, cC}) // A -- B -- C
+	pumpAll([]*core.Core{cA, cB, cC})
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	idC, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (C) returned error: %v", err)
+	}
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	gA := garlic.New(cA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(cB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gC := garlic.New(cC, idC, cfg, garlic.NewStaticRendezvous())
+	defer gC.Close()
+
+	waitForCapability(t, gA, cB.PublicKey(), 60*time.Second)
+	waitForCapability(t, gB, cC.PublicKey(), 60*time.Second)
+
+	sockPath := newTestAdminSocket(t, cA, gA)
+	callAdminWithArgs(t, sockPath, "garlicGossipPull", map[string]interface{}{"key": hex.EncodeToString(cB.PublicKey())})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, cC.PublicKey()) {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("A never learned about C via the garlicGossipPull admin RPC")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

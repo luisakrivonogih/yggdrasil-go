@@ -78,6 +78,27 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			return map[string]string{"circuitId": circuitIDToString(id)}, nil
 		})
 
+	_ = a.AddHandler("createGarlicCircuitAuto", "Automatically build a circuit from topologically diverse, capability-verified candidates (first hop restricted to self-verified peers)", []string{"[hopCount]"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				HopCount string `json:"hopCount"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			n := g.cfg.PathLength
+			if req.HopCount != "" {
+				if _, err := fmt.Sscanf(req.HopCount, "%d", &n); err != nil {
+					return nil, fmt.Errorf("invalid hopCount: %w", err)
+				}
+			}
+			id, err := g.AutoCreateCircuit(n)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"circuitId": circuitIDToString(id)}, nil
+		})
+
 	_ = a.AddHandler("closeGarlicCircuit", "Close a previously created circuit", []string{"circuitId"},
 		func(in json.RawMessage) (interface{}, error) {
 			id, err := parseCircuitIDRequest(in)
@@ -279,15 +300,52 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			return map[string]interface{}{"originated": origOut, "relayed": relOut}, nil
 		})
 
+	_ = a.AddHandler("getGarlicAutoPool", "List this node's auto-managed circuit pool", []string{},
+		func(in json.RawMessage) (interface{}, error) {
+			entries := g.AutoPoolStatus()
+			out := make([]map[string]interface{}, len(entries))
+			for i, e := range entries {
+				out[i] = map[string]interface{}{
+					"circuitId": circuitIDToString(e.ID),
+					"createdAt": e.CreatedAt.UTC().Format(time.RFC3339),
+					"hops":      e.HopCount,
+				}
+			}
+			return map[string]interface{}{"pool": out}, nil
+		})
+
+	_ = a.AddHandler("recvGarlicAuto", "Wait for the next real (non-cover) payload delivered to this node as an auto-pool circuit's final hop", []string{"[timeoutSeconds]"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				TimeoutSeconds string `json:"timeoutSeconds"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			timeout, err := parseSecondsOrDefault(req.TimeoutSeconds, 5*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			msg, err := g.RecvGarlicAuto(timeout)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{
+				"circuitId": circuitIDToString(msg.CircuitID),
+				"payload":   hex.EncodeToString(msg.Payload),
+			}, nil
+		})
+
 	_ = a.AddHandler("getGarlicKnownPeers", "List Garlic peers this node knows about (direct or via gossip)", []string{},
 		func(in json.RawMessage) (interface{}, error) {
 			peers := g.KnownPeers()
-			out := make([]map[string]string, len(peers))
+			out := make([]map[string]interface{}, len(peers))
 			for i, p := range peers {
-				out[i] = map[string]string{
+				out[i] = map[string]interface{}{
 					"nodeKey":         hex.EncodeToString(p.NodeKey),
 					"garlicPublicKey": hex.EncodeToString(p.GarlicPublicKey),
 					"lastSeen":        p.LastSeen.UTC().Format(time.RFC3339),
+					"selfVerified":    p.SelfVerified,
 				}
 			}
 			return map[string]interface{}{"peers": out}, nil
@@ -306,6 +364,24 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 				return nil, fmt.Errorf("invalid key: %w", err)
 			}
 			if err := g.GossipAnnounce(key); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{}, nil
+		})
+
+	_ = a.AddHandler("garlicGossipPull", "Ask an already capability-verified peer to send its known-peer sample now", []string{"key"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			key, err := hex.DecodeString(req.Key)
+			if err != nil {
+				return nil, fmt.Errorf("invalid key: %w", err)
+			}
+			if err := g.RequestGossip(key); err != nil {
 				return nil, err
 			}
 			return map[string]interface{}{}, nil
