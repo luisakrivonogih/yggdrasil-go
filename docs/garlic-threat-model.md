@@ -456,6 +456,25 @@ partial mitigations now exist, alongside real remaining gaps:
   guard for this node's auto-built circuits without also being
   personally capability-verified by it first.
 
+**How much "self-verified" narrows over time:** the flag is only ever set
+by a capability response to a request this node itself had outstanding
+(`handleCapabilityResponse` gates on `Garlic.pending`), so it cannot be
+claimed by an unsolicited packet — but it is set by *any* such exchange,
+including the per-hop `QueryCapability` that `AutoCreateCircuit` performs
+on middle-hop candidates it drew from the gossiped tier. A gossip-sourced
+candidate that gets selected into any non-guard position of any auto-built
+circuit is therefore promoted to self-verified as a side effect of that
+circuit being built, and `discoveryRegistry.record` never downgrades it
+again. Across many circuits and rotations, the self-verified set drifts
+toward "every peer this node has ever successfully built through" rather
+than staying "peers this node deliberately sought out". Each promotion
+still costs the adversary a real handshake this node initiated, so the
+guard restriction keeps its meaning — an attacker cannot inject itself —
+but the practical bar it enforces erodes toward "has been contacted at
+least once", which is weaker than the phrase "self-verified" suggests on
+its own. Nothing here expires or re-scores an entry, so the drift is
+one-directional.
+
 **What remains genuinely unmitigated:** neither `SelectDiversePath` nor
 the guard policy has any concept of IP/ASN diversity or real-world
 operator identity — an adversary who deploys nodes with genuinely

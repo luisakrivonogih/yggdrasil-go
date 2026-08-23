@@ -528,7 +528,18 @@ re-randomized on top of this by `Config.PaddingEnabled` (§9), so an
 all-zero plaintext is sufficient — nothing about it is observable past
 the AEAD seal) — over every circuit currently in the auto-pool, on
 average every `Config.CoverTrafficInterval` (default 75s), jittered
-±50% so the interval itself isn't a fixed, fingerprintable period. Sent
+±50% so the interval itself isn't a fixed, fingerprintable period.
+
+Scheduling is per circuit, not per round: when a round comes due,
+`sendCoverTraffic` gives each pool circuit its own delay, drawn
+independently and uniformly from `[0, Config.CoverTrafficInterval)`
+(`coverTrafficStagger`), rather than sending to all of them at once. That
+independence is load-bearing — a single shared instant would put
+`Config.AutoPoolSize` cover packets on the wire toward
+`Config.AutoPoolSize` *different* first hops within one scheduling
+window, which is itself a correlation signal binding those otherwise
+unrelated circuits to one originator, exactly the "never all at once"
+property circuit rotation already preserves (§10). Sent
 as ordinary, validly-encrypted `msgTypeCircuitDataV3` traffic, this
 travels the *full* circuit depth — indistinguishable in shape from real
 auto-pool traffic to every intermediate hop, and to the terminal hop too,
@@ -570,10 +581,20 @@ is no "client-only mode" — see `docs/garlic-threat-model.md`'s
 that this node's relay/terminal-hop code can correctly handle a
 `msgTypeCircuitDataV3` packet if selected into someone else's circuit.
 
-`Garlic.AutoCreateCircuit` checks `SupportsAutoCircuit()` via a fresh
-`QueryCapability` round trip for **every** selected hop, not only the
-terminal one — a candidate missing it fails circuit construction with
-`ErrHopMissingAutoCircuitSupport`. This is stricter than strictly
+`Garlic.AutoCreateCircuit` checks `SupportsAutoCircuit()` via
+`QueryCapability` for **every** selected hop, not only the terminal one —
+a candidate missing it fails circuit construction with
+`ErrHopMissingAutoCircuitSupport`. Note that `QueryCapability` reuses a
+cached result if one already exists for that key (the cache has no TTL);
+only a hop this node has no cached answer for costs an actual round trip.
+That is the same behavior as the manual `createGarlicCircuit` admin RPC,
+and it is deliberate: forcing a fresh `PingCapability` for every hop would
+add a full round trip per hop to every auto-built circuit, including for
+peers just verified moments earlier. The consequence to be aware of is
+that "re-verified per hop" means "checked against what this node has
+itself confirmed at some point", not "confirmed live at build time" — a
+hop that has since gone away is detected by the circuit failing in use,
+not by this check. This is stricter than strictly
 necessary for a purely-intermediate position (forwarding never inspects
 `Inner`, so even code that predates this feature would happen to forward
 a V3 packet correctly by accident) — but a legacy *terminal* hop would
