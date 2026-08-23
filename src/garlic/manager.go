@@ -28,6 +28,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -139,12 +140,13 @@ func DefaultConfig() Config {
 const jitterWorkers = 16
 
 var (
-	ErrInvalidPath       = errors.New("garlic: invalid circuit path")
-	ErrCircuitNotFound   = errors.New("garlic: circuit not found")
-	ErrCapabilityTimeout = errors.New("garlic: capability request timed out")
-	ErrRecvTimeout       = errors.New("garlic: no message received before timeout")
-	ErrPoolNotFound      = errors.New("garlic: circuit pool not found")
-	ErrEmptyPool         = errors.New("garlic: circuit pool must have at least one path")
+	ErrInvalidPath                  = errors.New("garlic: invalid circuit path")
+	ErrCircuitNotFound              = errors.New("garlic: circuit not found")
+	ErrCapabilityTimeout            = errors.New("garlic: capability request timed out")
+	ErrRecvTimeout                  = errors.New("garlic: no message received before timeout")
+	ErrPoolNotFound                 = errors.New("garlic: circuit pool not found")
+	ErrEmptyPool                    = errors.New("garlic: circuit pool must have at least one path")
+	ErrHopMissingAutoCircuitSupport = errors.New("garlic: candidate hop does not support CapabilityAutoCircuit")
 )
 
 // DeliveredMessage is an application payload that arrived because this
@@ -432,6 +434,37 @@ func (g *Garlic) candidatePool() []HopCandidate {
 // discovered/gossiped entry has gone stale.
 func (g *Garlic) SelectPath(n int) ([]HopCandidate, error) {
 	return SelectDiversePath(g.candidatePool(), n, g.cfg.MinHopCount)
+}
+
+// AutoCreateCircuit builds an n-hop circuit entirely from this node's
+// discovery pool: SelectPathWithGuardPolicy chooses hops (first from
+// self-verified candidates only), each is freshly re-verified via
+// QueryCapability (catching a stale/now-unresponsive gossiped candidate
+// before it's used, same as the manual createGarlicCircuit admin RPC
+// already does), and every hop must additionally advertise
+// CapabilityAutoCircuit - see
+// docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §6/§8 for why every position, not just the terminal one, is gated.
+func (g *Garlic) AutoCreateCircuit(n int) (CircuitID, error) {
+	hops, err := SelectPathWithGuardPolicy(g.candidatePool(), n, g.cfg.MinHopCount)
+	if err != nil {
+		return CircuitID{}, err
+	}
+
+	path := make([]CapabilityMessage, len(hops))
+	nodeKeys := make([][]byte, len(hops))
+	for i, h := range hops {
+		capability, err := g.QueryCapability(h.NodeKey)
+		if err != nil {
+			return CircuitID{}, fmt.Errorf("hop %d: %w", i, err)
+		}
+		if !capability.SupportsAutoCircuit() {
+			return CircuitID{}, fmt.Errorf("hop %d: %w", i, ErrHopMissingAutoCircuitSupport)
+		}
+		path[i] = *capability
+		nodeKeys[i] = h.NodeKey
+	}
+	return g.CreateCircuit(path, nodeKeys)
 }
 
 // Identity returns this node's long-term Garlic identity.

@@ -713,6 +713,72 @@ func TestIntegrationBootstrapPeersRecordedAsSelfVerified(t *testing.T) {
 	}
 }
 
+func TestIntegrationAutoCreateCircuitUsesSelfVerifiedGuard(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0 // this tiny topology has no room for a real distance filter
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+
+	id, err := gA.AutoCreateCircuit(1)
+	if err != nil {
+		t.Fatalf("AutoCreateCircuit returned error: %v", err)
+	}
+
+	var found *garlic.Circuit
+	for _, c := range gA.OriginatedCircuits() {
+		if c.ID == id {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatal("AutoCreateCircuit's returned ID is not in OriginatedCircuits()")
+	}
+	hops := found.HopKeys()
+	if len(hops) != 1 || !bytes.Equal(hops[0], nodeB.PublicKey()) {
+		t.Fatalf("hops = %x, want [%x] (B, the only self-verified candidate)", hops, nodeB.PublicKey())
+	}
+}
+
+func TestIntegrationAutoCreateCircuitFailsWithoutSelfVerifiedCandidate(t *testing.T) {
+	nodeA := newLinkedTestNode(t) // deliberately unpeered - candidatePool() will be empty
+	defer nodeA.Stop()
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	gA := garlic.New(nodeA, idA, garlic.DefaultConfig(), garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	if _, err := gA.AutoCreateCircuit(1); !errors.Is(err, garlic.ErrNoSelfVerifiedCandidates) {
+		t.Fatalf("err = %v, want ErrNoSelfVerifiedCandidates", err)
+	}
+}
+
 func countDelivered(t *testing.T, g *garlic.Garlic, want int, maxWait time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(maxWait)
