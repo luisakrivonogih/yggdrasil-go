@@ -91,6 +91,15 @@ type Config struct {
 	// close to this node (e.g. a direct peer) is more likely to be run
 	// by the same operator or network than one several hops away.
 	MinHopCount int
+
+	// BootstrapPeers seeds the discovery registry at startup: this node
+	// queries each entry (hex-encoded node key) for its Garlic
+	// capability and, on success, immediately requests its known-peer
+	// gossip sample (RequestGossip) - the one manual step needed before
+	// AutoCreateCircuit has anything to work with, analogous to
+	// Yggdrasil's own NodeConfig.Peers. Best-effort: an unreachable
+	// bootstrap peer is simply skipped, not retried on a tight loop.
+	BootstrapPeers []string
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -233,6 +242,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 	}, cfg.JitterQueueSize, jitterWorkers)
 	c.SetGarlicHandler(g.handleIncoming)
 	go g.cleanupLoop()
+	go g.bootstrap()
 	return g
 }
 
@@ -303,6 +313,44 @@ func (g *Garlic) gossipTick() {
 			continue
 		}
 		_ = g.GossipAnnounce(peerKey)
+	}
+}
+
+// bootstrapMaxAttempts bounds how many times bootstrap queries a single
+// configured peer before giving up on it. A freshly-established mesh
+// connection's very first capability request commonly races the
+// underlying path discovery (see ironwood's pathfinder) and is lost -
+// every other capability-querying test in this package retries for
+// exactly this reason (see waitForCapability). Each attempt is already
+// naturally paced by Config.CapabilityTimeout, so a handful of attempts
+// is not the "tight loop" this field's doc comment disclaims - just
+// enough to not depend on winning that race on the first try.
+const bootstrapMaxAttempts = 3
+
+// bootstrap resolves Config.BootstrapPeers into self-verified discovery
+// entries: QueryCapability (records the entry as SelfVerified via
+// handleCapabilityResponse) followed by RequestGossip, per peer,
+// best-effort - up to bootstrapMaxAttempts per peer, then skipped for
+// good (not retried again until the next process restart). Called once
+// from New in its own goroutine so New itself returns immediately,
+// matching this package's existing convention.
+func (g *Garlic) bootstrap() {
+	for _, hexKey := range g.cfg.BootstrapPeers {
+		key, err := hex.DecodeString(hexKey)
+		if err != nil {
+			continue
+		}
+		var verified bool
+		for attempt := 0; attempt < bootstrapMaxAttempts; attempt++ {
+			if _, err := g.QueryCapability(key); err == nil {
+				verified = true
+				break
+			}
+		}
+		if !verified {
+			continue
+		}
+		_ = g.RequestGossip(key)
 	}
 }
 

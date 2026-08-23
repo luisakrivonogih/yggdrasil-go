@@ -17,6 +17,7 @@ package garlic_test
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/url"
@@ -659,6 +660,56 @@ func TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips(t *testing.T) {
 	// RecvGarlic channel.
 	if _, err := gB.RecvGarlic(200 * time.Millisecond); !errors.Is(err, garlic.ErrRecvTimeout) {
 		t.Fatalf("RecvGarlic err = %v, want ErrRecvTimeout (auto-pool traffic must stay off the manual delivery channel)", err)
+	}
+}
+
+func TestIntegrationBootstrapPeersRecordedAsSelfVerified(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	// B must exist and be Garlic-capable before A starts, since A's
+	// bootstrap step (launched from New, best-effort) queries it once.
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeB.PublicKey()) && p.SelfVerified {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A never recorded its configured BootstrapPeers entry as self-verified; known peers: %+v", gA.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
