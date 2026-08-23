@@ -75,6 +75,12 @@ type GarlicConfig struct {
 	Jitter             GarlicJitterConfig  `comment:"Random delay before actually transmitting a circuit packet (origin\nsend or relay forward), independently re-rolled per packet - the\ntiming half of the same traffic-correlation defense as Padding."`
 	MaxDiscoveredPeers int                 `comment:"Maximum number of other Garlic nodes this node will remember, learned\neither directly (a successful capability query) or via gossip from\nanother already-verified Garlic peer. Never exposed to, or\ndiscoverable by, a non-Garlic node."`
 	MinHopCount        int                 `comment:"Minimum mesh hop distance for a candidate to be selected as a circuit\nhop by SelectPath - a node too close is more likely to be run by the\nsame operator or network as this one. Does not affect hops supplied\ndirectly to CreateCircuit."`
+	BootstrapPeers        []string `comment:"Hex-encoded node keys of a few known Garlic-capable peers, queried at\nstartup so this node's candidate pool starts non-empty - analogous to\nthe top-level Peers setting, but for Garlic circuit-hop discovery\nrather than mesh transport. Empty by default."`
+	AutoPoolEnabled       bool     `comment:"Maintains a small background pool of automatically-built circuits\n(no manual hop keys needed) for sendGarlic/recvGarlic-style use and\nthe dashboard. Default is false; a node can still relay/terminate for\nother nodes' auto-pool circuits with this off."`
+	AutoPoolSize          int      `comment:"Number of circuits the auto-pool maintains."`
+	AutoRotationInterval  string   `comment:"How often one auto-pool circuit (the oldest) is retired and rebuilt\n(Go duration format, e.g. \"15m\"). Never the whole pool at once."`
+	CoverTrafficEnabled   bool     `comment:"Sends periodic dummy traffic over every auto-pool circuit, even when\nthere's nothing real to send - raises the cost of traffic-volume\ncorrelation. Real, ongoing bandwidth cost - see docs/garlic-threat-model.md.\nDefault is true, with a low-bandwidth default interval."`
+	CoverTrafficInterval  string   `comment:"Average spacing between cover packets per auto-pool circuit (Go\nduration format), jittered +/-50%% so it isn't perfectly periodic."`
 }
 
 type GarlicPaddingConfig struct {
@@ -142,8 +148,14 @@ func GenerateConfig() *NodeConfig {
 			MinDelay: "0s",
 			MaxDelay: "75ms",
 		},
-		MaxDiscoveredPeers: 1024,
-		MinHopCount:        2,
+		MaxDiscoveredPeers:   1024,
+		MinHopCount:          2,
+		BootstrapPeers:       []string{},
+		AutoPoolEnabled:      false,
+		AutoPoolSize:         3,
+		AutoRotationInterval: "15m",
+		CoverTrafficEnabled:  true,
+		CoverTrafficInterval: "75s",
 	}
 	cfg.Dashboard = DashboardConfig{
 		Enabled: false,
