@@ -294,6 +294,18 @@ func (g *Garlic) GossipAnnounce(to ed25519.PublicKey) error {
 	return err
 }
 
+// RequestGossip asks peer to immediately send this node its known-peer
+// gossip sample (msgTypeAnnounceRequest, empty body) - see
+// docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §4. A peer running code without this feature simply never answers;
+// handleIncoming's switch has no default case, so an unrecognized type
+// byte is already silently ignored (Go zero-value switch fallthrough) -
+// no capability check needed before sending this specific message.
+func (g *Garlic) RequestGossip(peer ed25519.PublicKey) error {
+	_, err := g.core.WriteGarlic([]byte{msgTypeAnnounceRequest}, iwt.Addr(peer))
+	return err
+}
+
 // KnownPeers returns every Garlic peer this node currently knows about,
 // whether learned directly (a successful capability query) or via
 // gossip from another peer (msgTypeAnnounce) - candidates for circuit
@@ -363,13 +375,17 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 	case msgTypeCapabilityResponse:
 		g.handleCapabilityResponse(from, data[1:])
 	case msgTypeCircuitData:
-		g.dispatchAction(g.processCircuitData(data[1:]), from)
+		g.dispatchAction(g.processCircuitData(data[1:], msgTypeCircuitData), from)
 	case msgTypeAnnounce:
 		g.processAnnounce(data[1:])
 	case msgTypeCircuitDataBundle:
 		for _, action := range g.processCircuitDataBundle(data[1:]) {
 			g.dispatchAction(action, from)
 		}
+	case msgTypeAnnounceRequest:
+		_ = g.GossipAnnounce(from)
+	case msgTypeCircuitDataV3:
+		g.dispatchAction(g.processCircuitData(data[1:], msgTypeCircuitDataV3), from)
 	}
 }
 

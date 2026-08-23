@@ -94,21 +94,21 @@ func TestNonAdjacentHopsCannotLinkViaEphemeralKeys(t *testing.T) {
 	e1 := append([]byte(nil), bodyToHop1[:KeySize]...)
 
 	hop1 := hopGarlicFor(hopIDs[0])
-	action1 := hop1.processCircuitData(bodyToHop1)
+	action1 := hop1.processCircuitData(bodyToHop1, msgTypeCircuitData)
 	if action1.kind != actionForward {
 		t.Fatalf("hop1 action = %v, want actionForward", action1.kind)
 	}
 	e2 := append([]byte(nil), action1.forwardMsg[1:1+KeySize]...)
 
 	hop2 := hopGarlicFor(hopIDs[1])
-	action2 := hop2.processCircuitData(action1.forwardMsg[1:])
+	action2 := hop2.processCircuitData(action1.forwardMsg[1:], msgTypeCircuitData)
 	if action2.kind != actionForward {
 		t.Fatalf("hop2 action = %v, want actionForward", action2.kind)
 	}
 	e3 := append([]byte(nil), action2.forwardMsg[1:1+KeySize]...)
 
 	hop3 := hopGarlicFor(hopIDs[2])
-	action3 := hop3.processCircuitData(action2.forwardMsg[1:])
+	action3 := hop3.processCircuitData(action2.forwardMsg[1:], msgTypeCircuitData)
 	if action3.kind != actionDeliver {
 		t.Fatalf("hop3 action = %v, want actionDeliver", action3.kind)
 	}
@@ -153,7 +153,7 @@ func TestRelay1CannotDeriveRelay2SessionKey(t *testing.T) {
 	}
 
 	hop1 := hopGarlicFor(hopIDs[0])
-	action1 := hop1.processCircuitData(bodyToHop1)
+	action1 := hop1.processCircuitData(bodyToHop1, msgTypeCircuitData)
 	if action1.kind != actionForward {
 		t.Fatalf("hop1 action = %v, want actionForward", action1.kind)
 	}

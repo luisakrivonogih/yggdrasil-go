@@ -280,6 +280,76 @@ func TestIntegrationGossipDiscoversUnknownPeer(t *testing.T) {
 	}
 }
 
+func TestIntegrationAnnounceRequestTriggersImmediateGossipAnnounce(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	nodeC := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB, nodeC}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all) // A -- B -- C
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	idC, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (C) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gC := garlic.New(nodeC, idC, cfg, garlic.NewStaticRendezvous())
+	defer gC.Close()
+
+	// B learns about C directly. A learns about B directly, but never
+	// queries C, and critically: B never queries A either, so (unlike
+	// TestIntegrationGossipDiscoversUnknownPeer) A is NOT in B's
+	// capabilityCache and B's periodic gossipTick would never target A.
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+	waitForCapability(t, gB, nodeC.PublicKey(), 60*time.Second)
+
+	for _, p := range gA.KnownPeers() {
+		if bytes.Equal(p.NodeKey, nodeC.PublicKey()) {
+			t.Fatal("A already knows about C before any gossip happened - test setup is invalid")
+		}
+	}
+
+	if err := gA.RequestGossip(nodeB.PublicKey()); err != nil {
+		t.Fatalf("RequestGossip returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeC.PublicKey()) && bytes.Equal(p.GarlicPublicKey, idC.PublicKey) {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A never learned about C via RequestGossip's pull within the deadline; known peers: %+v", gA.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestIntegrationSelectPathAgainstRealTopology proves SelectPath's
 // core.Core.GetTree()/GetPaths() integration works against a real mesh,
 // not just SelectDiversePath's already-unit-tested selection algorithm

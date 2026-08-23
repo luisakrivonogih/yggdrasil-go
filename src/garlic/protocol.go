@@ -25,6 +25,16 @@ const (
 	msgTypeCircuitData
 	msgTypeAnnounce
 	msgTypeCircuitDataBundle
+	// msgTypeAnnounceRequest asks the recipient to immediately send back
+	// a msgTypeAnnounce with its known-peer sample (empty body) - a
+	// "pull" complementing the existing periodic gossipTick "push", so a
+	// freshly bootstrapped node (not yet in anyone's capabilityCache, so
+	// never a gossipTick target) can populate its candidate pool in one
+	// round trip. See docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md §4.
+	msgTypeAnnounceRequest
+	// msgTypeCircuitDataV3 is the auto-pool circuit wire type - see §8 of
+	// the same design doc and Task 6/7 of its implementation plan.
+	msgTypeCircuitDataV3
 )
 
 // circuitDataMinSize is the minimum length of a circuitData message body
@@ -57,12 +67,21 @@ type circuitAction struct {
 	payload    []byte
 	forwardTo  []byte
 	forwardMsg []byte
+	// tagged is true iff this action arose from a msgTypeCircuitDataV3
+	// packet - only actionDeliver consults it (see manager.go's
+	// dispatchAction/deliverTagged); forwarding already preserves the
+	// type byte directly in forwardMsg.
+	tagged bool
 }
 
 // processCircuitData decides what to do with the body of a
-// msgTypeCircuitData message (i.e. everything after that leading type
-// byte). It performs no I/O.
-func (g *Garlic) processCircuitData(body []byte) circuitAction {
+// msgTypeCircuitData or msgTypeCircuitDataV3 message (i.e. everything
+// after that leading type byte) - msgType is that leading byte, needed
+// so a forwarded packet echoes the same type it arrived as (never
+// hardcoded - see docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §8) and so a terminal delivery knows whether to tag the resulting
+// circuitAction. It performs no I/O.
+func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 	if len(body) < circuitDataMinSize {
 		g.security.malformedPackets.Add(1)
 		return circuitAction{kind: actionDrop}
@@ -114,7 +133,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 	}
 
 	if len(layer.NextHop) == 0 {
-		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner}
+		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}
 	}
 	if len(layer.NextHopEphemeral) != KeySize {
 		// A well-formed intermediate layer always carries the next hop's
@@ -143,7 +162,7 @@ func (g *Garlic) processCircuitData(body []byte) circuitAction {
 		return circuitAction{kind: actionDrop}
 	}
 	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
-	forwardMsg = append(forwardMsg, msgTypeCircuitData)
+	forwardMsg = append(forwardMsg, msgType)
 	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
 
@@ -197,7 +216,7 @@ func (g *Garlic) processCircuitDataBundle(body []byte) []circuitAction {
 	}
 	var actions []circuitAction
 	for _, sub := range bundle.Messages {
-		if action := g.processCircuitData(sub); action.kind != actionDrop {
+		if action := g.processCircuitData(sub, msgTypeCircuitData); action.kind != actionDrop {
 			actions = append(actions, action)
 		}
 	}

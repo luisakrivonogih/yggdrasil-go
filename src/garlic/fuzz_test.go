@@ -76,7 +76,7 @@ func FuzzProcessCircuitData(f *testing.F) {
 	f.Add(make([]byte, KeySize))
 	f.Add(make([]byte, circuitDataMinSize))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_ = g.processCircuitData(data)
+		_ = g.processCircuitData(data, msgTypeCircuitData)
 	})
 }
 

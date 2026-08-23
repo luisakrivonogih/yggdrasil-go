@@ -93,7 +93,7 @@ func TestProcessCircuitDataTerminalHopDelivers(t *testing.T) {
 	payload := []byte("hello bob")
 	msg, circuitID := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, payload, time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDeliver {
 		t.Fatalf("action.kind = %v, want actionDeliver", action.kind)
 	}
@@ -119,7 +119,7 @@ func TestProcessCircuitDataIntermediateHopForwards(t *testing.T) {
 		[][]byte{[]byte("relay-node-key"), destNodeKey},
 		payload, time.Minute)
 
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionForward {
 		t.Fatalf("action.kind = %v, want actionForward", action.kind)
 	}
@@ -136,7 +136,7 @@ func TestProcessCircuitDataIntermediateHopForwards(t *testing.T) {
 	// crash).
 	final := destID
 	finalGarlic := &Garlic{identity: final, relayState: newRelayCircuitState(1024)}
-	finalAction := finalGarlic.processCircuitData(action.forwardMsg[1:]) // strip the msgTypeCircuitData prefix, as handleIncoming would
+	finalAction := finalGarlic.processCircuitData(action.forwardMsg[1:], msgTypeCircuitData) // strip the msgTypeCircuitData prefix, as handleIncoming would
 	if finalAction.kind != actionDeliver {
 		t.Fatalf("final hop action.kind = %v, want actionDeliver", finalAction.kind)
 	}
@@ -158,7 +158,7 @@ func TestProcessCircuitDataForwardAppliesRandomPadding(t *testing.T) {
 			[]*Identity{relay.identity, destID},
 			[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
 			[]byte("payload"), time.Minute)
-		action := relay.processCircuitData(msg)
+		action := relay.processCircuitData(msg, msgTypeCircuitData)
 		if action.kind != actionForward {
 			t.Fatalf("action.kind = %v, want actionForward", action.kind)
 		}
@@ -182,7 +182,7 @@ func TestProcessCircuitDataForwardPaddingWithinConfiguredRange(t *testing.T) {
 		[]*Identity{relay.identity, destID},
 		[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
 		[]byte("payload"), time.Minute)
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionForward {
 		t.Fatalf("action.kind = %v, want actionForward", action.kind)
 	}
@@ -205,7 +205,7 @@ func TestProcessCircuitDataForwardSkipsPaddingWhenDisabled(t *testing.T) {
 		[]*Identity{relay.identity, destID},
 		[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
 		[]byte("payload"), time.Minute)
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionForward {
 		t.Fatalf("action.kind = %v, want actionForward", action.kind)
 	}
@@ -295,7 +295,7 @@ func TestProcessCircuitDataDropsMissingNextHopEphemeral(t *testing.T) {
 	}
 
 	msg := buildCircuitDataMissingNextHopEphemeral(t, relay.identity, destID.PublicKey)
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (NextHop set but NextHopEphemeral missing)", action.kind)
 	}
@@ -309,7 +309,7 @@ func TestProcessCircuitDataDropsWrongRecipient(t *testing.T) {
 	}
 	msg, _ := buildTestCircuitData(t, []*Identity{other}, [][]byte{[]byte("someone-else")}, []byte("payload"), time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (message encrypted for a different identity)", action.kind)
 	}
@@ -322,11 +322,11 @@ func TestProcessCircuitDataDropsReplay(t *testing.T) {
 	g := newTestGarlic(t)
 	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, []byte("payload"), time.Minute)
 
-	first := g.processCircuitData(msg)
+	first := g.processCircuitData(msg, msgTypeCircuitData)
 	if first.kind != actionDeliver {
 		t.Fatalf("first action.kind = %v, want actionDeliver", first.kind)
 	}
-	second := g.processCircuitData(msg)
+	second := g.processCircuitData(msg, msgTypeCircuitData)
 	if second.kind != actionDrop {
 		t.Fatalf("second (replayed) action.kind = %v, want actionDrop", second.kind)
 	}
@@ -339,7 +339,7 @@ func TestProcessCircuitDataDropsExpired(t *testing.T) {
 	g := newTestGarlic(t)
 	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, []byte("payload"), -time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (expired)", action.kind)
 	}
@@ -350,7 +350,7 @@ func TestProcessCircuitDataDropsExpired(t *testing.T) {
 
 func TestProcessCircuitDataDropsMalformedTooShort(t *testing.T) {
 	g := newTestGarlic(t)
-	action := g.processCircuitData([]byte{1, 2, 3})
+	action := g.processCircuitData([]byte{1, 2, 3}, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (too short to contain an ephemeral key)", action.kind)
 	}
@@ -362,7 +362,7 @@ func TestProcessCircuitDataDropsMalformedTooShort(t *testing.T) {
 func TestProcessCircuitDataDropsMalformedEnvelope(t *testing.T) {
 	g := newTestGarlic(t)
 	junk := make([]byte, KeySize+10)
-	action := g.processCircuitData(junk)
+	action := g.processCircuitData(junk, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (malformed envelope)", action.kind)
 	}
@@ -376,12 +376,88 @@ func TestProcessCircuitDataDropsWhenRelayTableFull(t *testing.T) {
 	g.relayState = newRelayCircuitState(0) // no room for any circuit
 	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, []byte("payload"), time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (relay circuit table full)", action.kind)
 	}
 	if got := g.security.snapshot().RelayTableFull; got != 1 {
 		t.Fatalf("security.RelayTableFull = %d, want 1", got)
+	}
+}
+
+func TestProcessCircuitDataV3ForwardPreservesMessageType(t *testing.T) {
+	relay := newTestGarlic(t)
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	destNodeKey := []byte("dest-node-key")
+	payload := []byte("hello bob")
+
+	msg, _ := buildTestCircuitData(t,
+		[]*Identity{relay.identity, destID},
+		[][]byte{[]byte("relay-node-key"), destNodeKey},
+		payload, time.Minute)
+
+	action := relay.processCircuitData(msg, msgTypeCircuitDataV3)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+	if got := action.forwardMsg[0]; got != msgTypeCircuitDataV3 {
+		t.Fatalf("forwardMsg[0] = %d, want msgTypeCircuitDataV3 (%d) - forwarding must preserve the inbound type, never hardcode msgTypeCircuitData", got, msgTypeCircuitDataV3)
+	}
+}
+
+func TestProcessCircuitDataPlainForwardStillUsesPlainType(t *testing.T) {
+	// Regression: the existing msgTypeCircuitData path must be completely
+	// unaffected by this task.
+	relay := newTestGarlic(t)
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	destNodeKey := []byte("dest-node-key")
+	payload := []byte("hello bob")
+
+	msg, _ := buildTestCircuitData(t,
+		[]*Identity{relay.identity, destID},
+		[][]byte{[]byte("relay-node-key"), destNodeKey},
+		payload, time.Minute)
+
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+	if got := action.forwardMsg[0]; got != msgTypeCircuitData {
+		t.Fatalf("forwardMsg[0] = %d, want msgTypeCircuitData (%d)", got, msgTypeCircuitData)
+	}
+}
+
+func TestProcessCircuitDataV3DeliverIsTagged(t *testing.T) {
+	g := newTestGarlic(t)
+	payload := []byte("hello bob")
+	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, payload, time.Minute)
+
+	action := g.processCircuitData(msg, msgTypeCircuitDataV3)
+	if action.kind != actionDeliver {
+		t.Fatalf("action.kind = %v, want actionDeliver", action.kind)
+	}
+	if !action.tagged {
+		t.Fatal("action.tagged = false, want true for a msgTypeCircuitDataV3 delivery")
+	}
+}
+
+func TestProcessCircuitDataPlainDeliverIsNotTagged(t *testing.T) {
+	g := newTestGarlic(t)
+	payload := []byte("hello bob")
+	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, payload, time.Minute)
+
+	action := g.processCircuitData(msg, msgTypeCircuitData)
+	if action.kind != actionDeliver {
+		t.Fatalf("action.kind = %v, want actionDeliver", action.kind)
+	}
+	if action.tagged {
+		t.Fatal("action.tagged = true, want false for a plain msgTypeCircuitData delivery")
 	}
 }
 
