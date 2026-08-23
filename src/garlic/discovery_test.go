@@ -149,3 +149,41 @@ func TestDiscoveryRegistrySampleCappedByAvailable(t *testing.T) {
 		t.Fatalf("sample(5) returned %d peers, want 1 (only one recorded)", len(sample))
 	}
 }
+
+func TestDiscoveryRegistryRecordSelfVerifiedDefaultsFalse(t *testing.T) {
+	r := newDiscoveryRegistry(16)
+	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga")})
+
+	peers := r.list()
+	if len(peers) != 1 || peers[0].SelfVerified {
+		t.Fatalf("SelfVerified = %v, want false for a plain gossip-recorded entry", peers[0].SelfVerified)
+	}
+}
+
+func TestDiscoveryRegistryRecordSelfVerifiedTrue(t *testing.T) {
+	r := newDiscoveryRegistry(16)
+	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga"), SelfVerified: true})
+
+	peers := r.list()
+	if len(peers) != 1 || !peers[0].SelfVerified {
+		t.Fatalf("SelfVerified = %v, want true", peers[0].SelfVerified)
+	}
+}
+
+func TestDiscoveryRegistryRecordNeverDowngradesSelfVerified(t *testing.T) {
+	r := newDiscoveryRegistry(16)
+	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga"), SelfVerified: true})
+	// A later gossip mention of the same key, unverified by us directly.
+	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga-refreshed"), SelfVerified: false})
+
+	peers := r.list()
+	if len(peers) != 1 {
+		t.Fatalf("list() returned %d peers, want 1", len(peers))
+	}
+	if !peers[0].SelfVerified {
+		t.Fatal("a later gossip-sourced record downgraded an existing self-verified entry, want it to stay true")
+	}
+	if string(peers[0].GarlicPublicKey) != "ga-refreshed" {
+		t.Fatalf("GarlicPublicKey = %q, want %q (other fields still refresh)", peers[0].GarlicPublicKey, "ga-refreshed")
+	}
+}
