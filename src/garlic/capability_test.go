@@ -112,3 +112,33 @@ func TestSupportsAutoCircuit(t *testing.T) {
 		t.Fatal("SupportsAutoCircuit() = true, want false")
 	}
 }
+
+func TestSupportsGarlicV3(t *testing.T) {
+	withV3 := &CapabilityMessage{Versions: []string{CapabilityGarlicV2, CapabilityGarlicV3}}
+	if !withV3.SupportsGarlicV3() {
+		t.Fatal("SupportsGarlicV3() = false, want true when garlic-v3 is present")
+	}
+	withoutV3 := &CapabilityMessage{Versions: []string{CapabilityGarlicV2}}
+	if withoutV3.SupportsGarlicV3() {
+		t.Fatal("SupportsGarlicV3() = true, want false when garlic-v3 is absent")
+	}
+}
+
+func TestProcessCapabilityRequestAdvertisesGarlicV3(t *testing.T) {
+	id, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	g := &Garlic{identity: id}
+	payload := g.processCapabilityRequest()
+	msg, err := UnmarshalCapabilityMessage(payload)
+	if err != nil {
+		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
+	}
+	if !msg.SupportsGarlicV3() {
+		t.Fatalf("advertised versions = %v, want garlic-v3 present", msg.Versions)
+	}
+	if !msg.SupportsGarlicV2() {
+		t.Fatalf("advertised versions = %v, want garlic-v2 still present for backward compat", msg.Versions)
+	}
+}

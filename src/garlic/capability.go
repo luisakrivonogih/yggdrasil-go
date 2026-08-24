@@ -20,6 +20,19 @@ import "errors"
 // circuit hop or rendezvous point.
 const CapabilityGarlicV2 = "garlic-v2"
 
+// CapabilityGarlicV3 is advertised by a node whose code understands the
+// hop-local envelope format (EnvelopeVersion2, src/garlic/envelope.go) -
+// see docs/superpowers/specs/2026-08-24-garlic-hop-local-metadata-design.md.
+// This name is unrelated to msgTypeCircuitDataV3 (src/garlic/protocol.go,
+// the auto-pool cover-traffic wire tag from the autonomous-routing work) -
+// the two "v3"s are two entirely different, coincidentally-numbered
+// version counters. A node that hasn't advertised garlic-v3 is never
+// selected as a hop for a circuit this node originates (manager.go's
+// CreateCircuit) - new circuits are always built in the hop-local format
+// once available, never intentionally falling back to garlic-v2's global
+// CircuitID/PacketCounter/Expiration.
+const CapabilityGarlicV3 = "garlic-v3"
+
 // CapabilityAutoCircuit is advertised by a node whose code understands
 // the auto-pool wire path (msgTypeAnnounceRequest, msgTypeCircuitDataV3
 // - see protocol.go) - independent of whether this operator has chosen
@@ -58,6 +71,17 @@ type CapabilityMessage struct {
 func (m *CapabilityMessage) SupportsGarlicV2() bool {
 	for _, v := range m.Versions {
 		if v == CapabilityGarlicV2 {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsGarlicV3 reports whether the message advertises
+// CapabilityGarlicV3.
+func (m *CapabilityMessage) SupportsGarlicV3() bool {
+	for _, v := range m.Versions {
+		if v == CapabilityGarlicV3 {
 			return true
 		}
 	}
