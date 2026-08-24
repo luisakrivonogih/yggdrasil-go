@@ -14,10 +14,23 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/big"
+	"time"
 )
 
-// EnvelopeVersion1 is the only Garlic Envelope wire version defined so far.
+// EnvelopeVersion1 is the original Garlic Envelope wire version: CircuitID,
+// PacketCounter, and Expiration are chosen once by the circuit originator
+// and copied unchanged at every relay hop. Kept only so this node can
+// still correctly relay another, not-yet-upgraded peer's legacy circuit -
+// this node itself never originates EnvelopeVersion1 traffic once
+// EnvelopeVersion2 is available (see manager.go's CreateCircuit).
 const EnvelopeVersion1 uint8 = 1
+
+// EnvelopeVersion2 is the hop-local envelope format: CircuitID,
+// PacketCounter, and Expiration are independent per hop-to-hop leg,
+// carried forward via LayerPlaintext's NextLocalCircuitID/NextLocalCounter/
+// NextLocalExpiration fields (layer.go) rather than copied verbatim. See
+// docs/superpowers/specs/2026-08-24-garlic-hop-local-metadata-design.md.
+const EnvelopeVersion2 uint8 = 2
 
 // MaxBodySize and MaxPaddingSize bound the envelope's variable-length
 // fields. They match the underlying core.Core.MTU() cap (65535 bytes) and
@@ -155,6 +168,29 @@ func randomIntInRange(lo, hi int) (int, error) {
 	return lo + int(n.Int64()), nil
 }
 
+// jitteredExpiration returns a Unix-seconds Expiration value for
+// now+ttl, independently jittered by up to +-10% of ttl (in whole
+// seconds, floor of 1 second either way) - the same per-hop-independent
+// jitter principle as PadToRandomRange's padding size, applied to
+// expiration instead: two legs of the same packet must not carry a
+// bit-identical wire Expiration (see docs/garlic-threat-model.md). Jitter
+// is computed in whole seconds, not ttl's native nanosecond resolution,
+// so the bound passed to randomIntInRange never risks overflowing a
+// 32-bit int on a 32-bit build target.
+func jitteredExpiration(ttl time.Duration) (uint64, error) {
+	base := time.Now().Add(ttl)
+	ttlSeconds := int(ttl / time.Second)
+	if ttlSeconds <= 0 {
+		return uint64(base.Unix()), nil
+	}
+	span := max(ttlSeconds/10, 1)
+	offsetSeconds, err := randomIntInRange(-span, span)
+	if err != nil {
+		return 0, err
+	}
+	return uint64(base.Add(time.Duration(offsetSeconds) * time.Second).Unix()), nil
+}
+
 // Unmarshal decodes a Garlic Envelope from its wire format. It never trusts
 // a declared length before validating it against both the configured
 // maximum and the bytes actually remaining in data, so malformed or
@@ -169,7 +205,7 @@ func Unmarshal(data []byte) (*Envelope, error) {
 	copy(e.CircuitID[:], data[1:17])
 	e.PacketCounter = binary.BigEndian.Uint64(data[17:25])
 	e.Expiration = binary.BigEndian.Uint64(data[25:33])
-	if e.Version != EnvelopeVersion1 {
+	if e.Version != EnvelopeVersion1 && e.Version != EnvelopeVersion2 {
 		return nil, ErrUnsupportedVersion
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 func TestEnvelopeMarshalUnmarshalRoundTrip(t *testing.T) {
@@ -308,5 +309,56 @@ func TestEnvelopeCircuitIDRoundTripsFull16Bytes(t *testing.T) {
 	}
 	if got.CircuitID != id {
 		t.Fatalf("CircuitID = %x, want %x (must round-trip all 16 bytes, not the old 8-byte width)", got.CircuitID, id)
+	}
+}
+
+func TestUnmarshalAcceptsEnvelopeVersion2(t *testing.T) {
+	e := &Envelope{
+		Version:       EnvelopeVersion2,
+		CircuitID:     testCircuitID(7),
+		PacketCounter: 3,
+		Expiration:    9999999999,
+		Body:          []byte("hello"),
+	}
+	data, err := e.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	got, err := Unmarshal(data)
+	if err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	if got.Version != EnvelopeVersion2 {
+		t.Fatalf("Version = %d, want %d", got.Version, EnvelopeVersion2)
+	}
+}
+
+func TestUnmarshalRejectsUnknownVersion(t *testing.T) {
+	e := &Envelope{Version: EnvelopeVersion2 + 1, CircuitID: testCircuitID(1), Body: []byte("x")}
+	data, err := e.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if _, err := Unmarshal(data); err != ErrUnsupportedVersion {
+		t.Fatalf("Unmarshal error = %v, want ErrUnsupportedVersion", err)
+	}
+}
+
+func TestJitteredExpirationVariesAcrossCalls(t *testing.T) {
+	ttl := 60 * time.Second
+	seen := make(map[uint64]bool)
+	for range 20 {
+		exp, err := jitteredExpiration(ttl)
+		if err != nil {
+			t.Fatalf("jitteredExpiration returned error: %v", err)
+		}
+		now := uint64(time.Now().Unix())
+		if exp < now || exp > now+uint64(ttl/time.Second)+10 {
+			t.Fatalf("jitteredExpiration = %d, out of plausible range around now+ttl (%d)", exp, now+uint64(ttl/time.Second))
+		}
+		seen[exp] = true
+	}
+	if len(seen) < 2 {
+		t.Fatal("jitteredExpiration returned the same value on every call - jitter isn't actually independent")
 	}
 }
