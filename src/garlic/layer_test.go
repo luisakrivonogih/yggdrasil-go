@@ -241,6 +241,99 @@ func TestBuildOnionRejectsEmptyPath(t *testing.T) {
 	}
 }
 
+func TestBuildOnionHopLocalEmbedsNextLegMetadata(t *testing.T) {
+	hops := testHops(3)
+	for i := range hops {
+		id, err := randomCircuitID()
+		if err != nil {
+			t.Fatalf("randomCircuitID returned error: %v", err)
+		}
+		hops[i].LocalCircuitID = id
+		hops[i].Counter = uint64(1000 * (i + 1)) // distinct starting points, mirrors CreateCircuit's random-offset intent
+	}
+	legExpirations := []uint64{111, 222, 333}
+	onion, err := BuildOnionHopLocal(hops, []byte("payload"), legExpirations)
+	if err != nil {
+		t.Fatalf("BuildOnionHopLocal returned error: %v", err)
+	}
+
+	// Hop 0 decrypts its own layer and must find leg 1's metadata (hops[1]'s
+	// LocalCircuitID/Counter, and legExpirations[1]) - not its own.
+	layer0, err := DecryptLayerHopLocal(hops[0].Key, hops[0].Counter, onion)
+	if err != nil {
+		t.Fatalf("DecryptLayerHopLocal (hop 0) returned error: %v", err)
+	}
+	if !bytes.Equal(layer0.NextLocalCircuitID, hops[1].LocalCircuitID[:]) {
+		t.Fatalf("hop0's NextLocalCircuitID = %x, want hops[1].LocalCircuitID = %x", layer0.NextLocalCircuitID, hops[1].LocalCircuitID[:])
+	}
+	if layer0.NextLocalCounter != hops[1].Counter {
+		t.Fatalf("hop0's NextLocalCounter = %d, want %d", layer0.NextLocalCounter, hops[1].Counter)
+	}
+	if layer0.NextLocalExpiration != legExpirations[1] {
+		t.Fatalf("hop0's NextLocalExpiration = %d, want %d", layer0.NextLocalExpiration, legExpirations[1])
+	}
+
+	// The terminal hop's own layer carries no NextLocal* fields at all.
+	layer1, err := DecryptLayerHopLocal(hops[1].Key, hops[1].Counter, layer0.Inner)
+	if err != nil {
+		t.Fatalf("DecryptLayerHopLocal (hop 1) returned error: %v", err)
+	}
+	layer2, err := DecryptLayerHopLocal(hops[2].Key, hops[2].Counter, layer1.Inner)
+	if err != nil {
+		t.Fatalf("DecryptLayerHopLocal (hop 2, terminal) returned error: %v", err)
+	}
+	if len(layer2.NextLocalCircuitID) != 0 {
+		t.Fatalf("terminal hop's NextLocalCircuitID = %x, want empty", layer2.NextLocalCircuitID)
+	}
+	if !bytes.Equal(layer2.Inner, []byte("payload")) {
+		t.Fatalf("delivered payload = %q, want %q", layer2.Inner, "payload")
+	}
+}
+
+func TestUnmarshalLayerPlaintextHopLocalRoundTrips(t *testing.T) {
+	nextID := CircuitID{1, 2, 3}
+	l := &LayerPlaintext{
+		NextHop:             []byte("next-hop-key"),
+		NextHopEphemeral:    make([]byte, KeySize),
+		Inner:               []byte("inner ciphertext"),
+		NextLocalCircuitID:  nextID[:],
+		NextLocalCounter:    42,
+		NextLocalExpiration: 999,
+	}
+	data, err := l.marshalHopLocal()
+	if err != nil {
+		t.Fatalf("marshalHopLocal returned error: %v", err)
+	}
+	got, err := unmarshalLayerPlaintextHopLocal(data)
+	if err != nil {
+		t.Fatalf("unmarshalLayerPlaintextHopLocal returned error: %v", err)
+	}
+	if !bytes.Equal(got.NextLocalCircuitID, nextID[:]) || got.NextLocalCounter != 42 || got.NextLocalExpiration != 999 {
+		t.Fatalf("round-trip mismatch: got %+v", got)
+	}
+}
+
+func TestUnmarshalLayerPlaintextUnchangedForLegacyShape(t *testing.T) {
+	// Existing legacy marshal/unmarshal pair must still round-trip exactly
+	// as before this task's parseLayerPlaintextPrefix refactor.
+	l := &LayerPlaintext{
+		NextHop:          []byte("next-hop-key"),
+		NextHopEphemeral: make([]byte, KeySize),
+		Inner:            []byte("inner ciphertext"),
+	}
+	data, err := l.marshal()
+	if err != nil {
+		t.Fatalf("marshal returned error: %v", err)
+	}
+	got, err := unmarshalLayerPlaintext(data)
+	if err != nil {
+		t.Fatalf("unmarshalLayerPlaintext returned error: %v", err)
+	}
+	if !bytes.Equal(got.NextHop, l.NextHop) || !bytes.Equal(got.NextHopEphemeral, l.NextHopEphemeral) || !bytes.Equal(got.Inner, l.Inner) {
+		t.Fatalf("legacy round-trip mismatch: got %+v, want %+v", got, l)
+	}
+}
+
 func TestBuildOnionSingleHop(t *testing.T) {
 	key, _ := DeriveKey([]byte("secret"), nil, LabelCircuitDataSend)
 	hops := []Hop{{NodeKey: []byte("node-A-key"), Key: key, Counter: 1}}
