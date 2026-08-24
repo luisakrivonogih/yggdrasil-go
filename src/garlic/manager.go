@@ -730,24 +730,29 @@ func (g *Garlic) nextAutoPoolInterval() time.Duration {
 	return interval
 }
 
-// autoPoolLoop maintains the auto-pool (fill on start, then retry
-// filling on autoPoolFillRetryInterval until the pool reaches
-// Config.AutoPoolSize; once full, rotate one circuit at a time on
-// Config.AutoRotationInterval) and, if Config.CoverTrafficEnabled, sends
+// autoPoolLoop maintains the auto-pool (fill on start, then keep filling
+// on autoPoolFillRetryInterval - one circuit per call, see fillAutoPool -
+// until the pool reaches Config.AutoPoolSize; once full, rotate one
+// circuit at a time on Config.AutoRotationInterval) and, if
+// Config.CoverTrafficEnabled, sends
 // jittered cover traffic over every pool circuit. No-op entirely if
 // Config.AutoPoolEnabled is false - a node can still relay/terminate for
 // other nodes' auto-pool circuits without running this loop itself.
 //
-// The rotate/fill timer is created once and only ever Reset from within
-// its own case (never recreated on an unrelated wakeup, e.g. a cover-
-// traffic send): recreating it every loop iteration would restart its
-// countdown from zero each time the *other* timer fires first, and if
-// that other timer's period is shorter (as CoverTrafficInterval
-// routinely is versus autoPoolFillRetryInterval or a short
-// Config.AutoRotationInterval), the rotate/fill timer would starve and
-// never actually fire. coverTimer has no such requirement - each send's
-// delay is meant to be freshly rerolled anyway (see coverTrafficDelay) -
-// so it's fine, and simplest, to keep recreating it every iteration.
+// Both timers - the rotate/fill timer and the cover-traffic timer - are
+// created once, before the loop, and only ever Reset from inside their
+// own case; neither is ever recreated on an unrelated wakeup. Recreating
+// a timer at the top of every iteration restarts its countdown from zero
+// each time some *other* case fires first, so any timer whose period is
+// longer than this loop's fastest wakeup source would starve and never
+// fire at all. That is not hypothetical here: the maintenance ticker
+// described below wakes the loop every autoPoolFillRetryInterval (2s)
+// unconditionally, which is shorter than Config.AutoRotationInterval and
+// - at every realistic setting, including the 75s default - shorter than
+// Config.CoverTrafficInterval too. Resetting coverTimer from within its
+// own case still rerolls its delay freshly for every round, which is
+// what coverTrafficDelay's per-round jitter needs; nothing about that
+// jitter requires a brand-new Timer.
 //
 // A third, backfill-only maintenance ticker runs at
 // autoPoolFillRetryInterval. It exists because circuits leave the pool on
@@ -772,14 +777,17 @@ func (g *Garlic) autoPoolLoop() {
 	maintTicker := time.NewTicker(autoPoolFillRetryInterval)
 	defer maintTicker.Stop()
 
-	for {
-		var coverTimer *time.Timer
-		var coverC <-chan time.Time
-		if g.cfg.CoverTrafficEnabled {
-			coverTimer = time.NewTimer(g.coverTrafficDelay())
-			coverC = coverTimer.C
-		}
+	// A nil coverC blocks forever in the select below, so cover traffic
+	// being disabled simply means that case never becomes ready.
+	var coverTimer *time.Timer
+	var coverC <-chan time.Time
+	if g.cfg.CoverTrafficEnabled {
+		coverTimer = time.NewTimer(g.coverTrafficDelay())
+		defer coverTimer.Stop()
+		coverC = coverTimer.C
+	}
 
+	for {
 		select {
 		case <-rotateTimer.C:
 			g.pruneAutoPool()
@@ -802,14 +810,9 @@ func (g *Garlic) autoPoolLoop() {
 			}
 		case <-coverC:
 			g.sendCoverTraffic()
+			coverTimer.Reset(g.coverTrafficDelay())
 		case <-g.stop:
-			if coverTimer != nil {
-				coverTimer.Stop()
-			}
 			return
-		}
-		if coverTimer != nil {
-			coverTimer.Stop()
 		}
 	}
 }

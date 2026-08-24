@@ -1066,6 +1066,106 @@ func TestIntegrationCoverTrafficNeverReachesRecvGarlicAuto(t *testing.T) {
 	}
 }
 
+// TestIntegrationCoverTrafficActuallyFiresFromAutoPoolLoop is the
+// regression test for autoPoolLoop starving its own cover-traffic timer.
+//
+// The loop used to recreate coverTimer at the top of every iteration and
+// stop it at the bottom. That is only safe while nothing else wakes the
+// loop more often than Config.CoverTrafficInterval - which is exactly why
+// the rotate/fill timer is instead created once and only Reset inside its
+// own case. Adding the backfill maintenance ticker (a hard
+// autoPoolFillRetryInterval = 2s wakeup, unconditional) broke that
+// invariant for coverTimer: at the shipped 75s interval (jittered into
+// roughly [37.5s, 112.5s]) the 2s tick always won the race, tore
+// coverTimer down and rebuilt it from zero, and cover traffic was never
+// sent at any realistic configuration.
+//
+// Directly unit-testing sendCoverTraffic cannot catch this - the bug is
+// in the surrounding select, not in the send - so this test runs the real
+// autoPoolLoop, with the real 2s maintenance ticker at its normal
+// unmodified production cadence, and only shortens the *configured* cover
+// interval.
+//
+// Config.CoverTrafficInterval is 5s rather than a few hundred ms on
+// purpose. coverTrafficDelay floors its result at one second, so any
+// interval below ~2s would produce a round delay shorter than the 2s
+// maintenance tick and the old code would have (accidentally) passed. 5s
+// jitters to [2.5s, 7.5s], which is always strictly longer than the
+// maintenance tick - the same relationship the shipped 75s default has,
+// just faster to test.
+//
+// Cover packets are discarded at the terminal hop and never reach
+// RecvGarlicAuto (see TestIntegrationCoverTrafficNeverReachesRecvGarlicAuto),
+// so the send is observed on the sender instead: Circuit.Seal is the only
+// thing in the package that increments a circuit's packet counter, and
+// building a circuit never calls it, so any increase in
+// Stats.OriginatedPackets here is necessarily a real cover send.
+// Config.AutoRotationInterval is set long so no pool circuit is closed
+// mid-test (GetStats sums over live circuits only).
+func TestIntegrationCoverTrafficActuallyFiresFromAutoPoolLoop(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = 1
+	cfgA.AutoRotationInterval = 5 * time.Minute // no rotation during the test: a closed circuit takes its counters with it
+	cfgA.CoverTrafficEnabled = true
+	cfgA.CoverTrafficInterval = 5 * time.Second
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for len(gA.AutoPoolStatus()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size 1; status: %+v", gA.AutoPoolStatus())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Nothing in this test ever calls SendGarlic/SendGarlicAuto, and the
+	// circuit build itself does not Seal, so this is 0 in practice - read
+	// it rather than assumed, so the assertion below is about the delta.
+	baseline := gA.GetStats().OriginatedPackets
+
+	// Worst case is one full round delay (7.5s) plus one full per-circuit
+	// stagger (5s) after the pool filled, so 60s is a wide margin.
+	deadline = time.Now().Add(60 * time.Second)
+	for {
+		if got := gA.GetStats().OriginatedPackets; got > baseline {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("OriginatedPackets never rose above baseline %d within 60s: autoPoolLoop never actually sent cover traffic over the pool circuit", baseline)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func countDelivered(t *testing.T, g *garlic.Garlic, want int, maxWait time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(maxWait)
