@@ -138,6 +138,9 @@ func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType 
 		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
+	// Wrong key (message wasn't encrypted for us), tampered
+	// ciphertext, or malformed plaintext all look identical here by
+	// design - see ErrNotForThisIdentity's doc comment.
 	layer, err := DecryptLayer(key, env.PacketCounter, env.Body)
 	if err != nil {
 		g.security.authFailures.Add(1)
@@ -146,6 +149,9 @@ func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType 
 	if len(layer.NextHop) == 0 {
 		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}
 	}
+	// A well-formed intermediate layer always carries the next hop's
+	// ephemeral key; anything else is malformed or malicious input,
+	// treated identically to any other unforwardable message.
 	if len(layer.NextHopEphemeral) != KeySize {
 		return circuitAction{kind: actionDrop}
 	}
@@ -156,6 +162,10 @@ func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType 
 		Expiration:    env.Expiration,
 		Body:          layer.Inner,
 	}
+	// Independently re-randomize this hop's outgoing wire size (see
+	// Config.PaddingEnabled's doc comment) - a config error here (e.g.
+	// MaxPaddedSize too small for this body) degrades to unpadded
+	// forwarding rather than dropping an otherwise-valid packet.
 	if g.cfg.PaddingEnabled {
 		_ = nextEnv.PadToRandomRange(g.cfg.MinPaddedSize, g.cfg.MaxPaddedSize)
 	}

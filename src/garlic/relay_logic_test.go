@@ -504,7 +504,7 @@ func TestProcessCircuitDataHopLocalForwardsNextLegMetadata(t *testing.T) {
 		Inner:               []byte("forwarded ciphertext placeholder"),
 		NextLocalCircuitID:  nextLegID[:],
 		NextLocalCounter:    123,
-		NextLocalExpiration: uint64(time.Now().Add(time.Minute).Unix()),
+		NextLocalExpiration: uint64(time.Now().Add(5 * time.Minute).Unix()),
 	}
 	ciphertext, err := EncryptLayerHopLocal(relayKey, 0, layer)
 	if err != nil {
