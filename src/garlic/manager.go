@@ -863,6 +863,25 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 	case msgTypeCapabilityRequest:
 		resp := append([]byte{msgTypeCapabilityResponse}, g.processCapabilityRequest()...)
 		_, _ = g.core.WriteGarlic(resp, iwt.Addr(from))
+		// Capability negotiation was previously one-directional: this node
+		// only ever recorded a peer as SelfVerified when IT sent the
+		// request (handleCapabilityResponse). A peer that only ever
+		// *asked* us - the common case for every node but the one at the
+		// center of a star-shaped bootstrap topology - was never recorded
+		// at all, so it could never be gossiped onward to anyone else,
+		// and pure fan-out bootstrapping (every node pointed at one hub)
+		// could never converge into a shared candidate pool. Answering a
+		// request is exactly as strong an authentication signal as
+		// receiving a response - ironwood's encrypted per-key session
+		// already guarantees `from` is the real sender - so querying back
+		// reuses the existing, already-reviewed QueryCapability/
+		// handleCapabilityResponse path to record it symmetrically.
+		// QueryCapability short-circuits on an existing cache entry, so
+		// this is a no-op wire-traffic-wise once both sides already know
+		// each other. Must run in its own goroutine: QueryCapability
+		// blocks up to Config.CapabilityTimeout on a cache miss, and
+		// handleIncoming must never block (see its own doc comment).
+		go func() { _, _ = g.QueryCapability(from) }()
 	case msgTypeCapabilityResponse:
 		g.handleCapabilityResponse(from, data[1:])
 	case msgTypeCircuitData:

@@ -282,6 +282,176 @@ func TestIntegrationGossipDiscoversUnknownPeer(t *testing.T) {
 	}
 }
 
+// TestIntegrationHubLearnsAboutRequesterWithoutQueryingItself proves the
+// core fix directly: a node that only ever ANSWERS a capability request
+// (never sends one itself) still ends up recording the requester as a
+// self-verified discovery candidate. Before this fix, handleIncoming's
+// msgTypeCapabilityRequest case only ever responded - it never recorded
+// anything about the requester - so a node that nobody ever queried FROM
+// (only queried BY others) could never learn about its own requesters at
+// all, regardless of how much time passed.
+func TestIntegrationHubLearnsAboutRequesterWithoutQueryingItself(t *testing.T) {
+	nodeHub := newLinkedTestNode(t)
+	nodeLeaf := newLinkedTestNode(t)
+	all := []*core.Core{nodeHub, nodeLeaf}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idHub, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (Hub) returned error: %v", err)
+	}
+	idLeaf, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (Leaf) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gHub := garlic.New(nodeHub, idHub, cfg, garlic.NewStaticRendezvous())
+	defer gHub.Close()
+	gLeaf := garlic.New(nodeLeaf, idLeaf, cfg, garlic.NewStaticRendezvous())
+	defer gLeaf.Close()
+
+	// Leaf queries Hub - the ordinary, one-directional bootstrap
+	// interaction. Hub never calls QueryCapability itself.
+	waitForCapability(t, gLeaf, nodeHub.PublicKey(), 60*time.Second)
+
+	// Hub must end up knowing about Leaf anyway, and as self-verified -
+	// answering an authenticated request is exactly as strong a signal as
+	// receiving an authenticated response.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gHub.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeLeaf.PublicKey()) && p.SelfVerified {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Hub never recorded Leaf as self-verified after only answering its request; known peers: %+v", gHub.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestIntegrationStarTopologyConverges reproduces the exact real-world
+// scenario this fix targets: every "leaf" node points its
+// Config.BootstrapPeers at one central "hub" (the common, natural
+// topology when several independently-installed servers are each told
+// "bootstrap against this one already-running node"), and the hub itself
+// has no BootstrapPeers of its own. Before this fix, the hub could never
+// learn about any leaf (each leaf only ever queried it, never the other
+// way around), so it had nothing to gossip and the leaves could never
+// discover each other - the star could never converge into a shared
+// candidate pool, no matter how long it ran. With the fix, once both
+// leaves have queried the hub, a leaf that pulls gossip from the hub
+// learns about the *other* leaf too.
+func TestIntegrationStarTopologyConverges(t *testing.T) {
+	nodeHub := newLinkedTestNode(t)
+	nodeLeafA := newLinkedTestNode(t)
+	nodeLeafC := newLinkedTestNode(t)
+	all := []*core.Core{nodeHub, nodeLeafA, nodeLeafC}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	// Star: both leaves connect only to the hub, never to each other.
+	connectChain(t, []*core.Core{nodeLeafA, nodeHub})
+	connectChain(t, []*core.Core{nodeHub, nodeLeafC})
+	pumpAll(all)
+
+	idHub, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (Hub) returned error: %v", err)
+	}
+	idLeafA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (LeafA) returned error: %v", err)
+	}
+	idLeafC, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (LeafC) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gHub := garlic.New(nodeHub, idHub, cfg, garlic.NewStaticRendezvous())
+	defer gHub.Close()
+	gLeafA := garlic.New(nodeLeafA, idLeafA, cfg, garlic.NewStaticRendezvous())
+	defer gLeafA.Close()
+	gLeafC := garlic.New(nodeLeafC, idLeafC, cfg, garlic.NewStaticRendezvous())
+	defer gLeafC.Close()
+
+	// Both leaves bootstrap against the hub - exactly matching
+	// Config.BootstrapPeers pointed at one already-running node. The hub
+	// itself never initiates anything.
+	waitForCapability(t, gLeafA, nodeHub.PublicKey(), 60*time.Second)
+	waitForCapability(t, gLeafC, nodeHub.PublicKey(), 60*time.Second)
+
+	// waitForCapability above only confirms each leaf's OWN outbound
+	// query succeeded - it says nothing about the hub's *reciprocal*
+	// query back to that leaf, which the fix fires in its own goroutine
+	// (handleIncoming must not block) and can still be in flight. Wait
+	// for the hub to have actually recorded both leaves before pulling
+	// gossip from it, or this test races the fix it's meant to exercise.
+	hubDeadline := time.Now().Add(10 * time.Second)
+	for {
+		knowsA, knowsC := false, false
+		for _, p := range gHub.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeLeafA.PublicKey()) && p.SelfVerified {
+				knowsA = true
+			}
+			if bytes.Equal(p.NodeKey, nodeLeafC.PublicKey()) && p.SelfVerified {
+				knowsC = true
+			}
+		}
+		if knowsA && knowsC {
+			break
+		}
+		if time.Now().After(hubDeadline) {
+			t.Fatalf("hub never recorded both leaves as self-verified; known peers: %+v", gHub.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	for _, p := range gLeafA.KnownPeers() {
+		if bytes.Equal(p.NodeKey, nodeLeafC.PublicKey()) {
+			t.Fatal("LeafA already knows about LeafC before any gossip pull happened - test setup is invalid")
+		}
+	}
+
+	// LeafA pulls gossip from the hub - the same RequestGossip call
+	// bootstrap() itself makes after a successful QueryCapability.
+	if err := gLeafA.RequestGossip(nodeHub.PublicKey()); err != nil {
+		t.Fatalf("RequestGossip returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gLeafA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeLeafC.PublicKey()) && bytes.Equal(p.GarlicPublicKey, idLeafC.PublicKey) {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("LeafA never learned about LeafC via the hub within the deadline; known peers: %+v", gLeafA.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestIntegrationAnnounceRequestTriggersImmediateGossipAnnounce(t *testing.T) {
 	nodeA := newLinkedTestNode(t)
 	nodeB := newLinkedTestNode(t)
