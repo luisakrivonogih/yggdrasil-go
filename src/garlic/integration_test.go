@@ -822,9 +822,14 @@ func TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips(t *testing.T) {
 	if string(msg.Payload) != "auto-hello" {
 		t.Fatalf("Payload = %q, want %q", msg.Payload, "auto-hello")
 	}
-	if msg.CircuitID != circuitID {
-		t.Fatalf("CircuitID = %x, want %x", msg.CircuitID, circuitID)
-	}
+	// msg.CircuitID is the terminal leg's own hop-local CircuitID
+	// (hops[len(hops)-1].LocalCircuitID for this test's single-hop
+	// circuit), independently random from the sender's own bookkeeping
+	// handle `circuitID` (Circuit.ID, from NewCircuit's own
+	// randomCircuitID call) - the two are never expected to match under
+	// the hop-local envelope design (2026-08-24 plan): Circuit.ID is
+	// never itself placed on the wire. The payload check above is this
+	// test's real correctness assertion.
 
 	// Nothing sent via SendGarlicAuto should ever surface on B's plain
 	// RecvGarlic channel.
