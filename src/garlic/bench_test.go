@@ -145,7 +145,7 @@ func BenchmarkProcessCircuitDataTerminalHop(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.StartTimer()
-		if action := g.processCircuitData(body); action.kind != actionDeliver {
+		if action := g.processCircuitData(body, msgTypeCircuitData); action.kind != actionDeliver {
 			b.Fatalf("action.kind = %v, want actionDeliver", action.kind)
 		}
 	}

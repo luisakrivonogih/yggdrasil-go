@@ -100,6 +100,12 @@ export interface GarlicSecurityCounters {
   relayTableFull: number;
 }
 
+export interface GarlicAutoPoolEntry {
+  circuitId: string;
+  createdAt: string;
+  hops: number;
+}
+
 export interface GarlicResponse {
   enabled: boolean;
   identity: { publicKey: string } | null;
@@ -112,7 +118,8 @@ export interface GarlicResponse {
     relayedBytes: number;
     security: GarlicSecurityCounters;
   };
-  knownPeers: Array<{ nodeKey: string; garlicPublicKey: string; lastSeen: string }>;
+  knownPeers: Array<{ nodeKey: string; garlicPublicKey: string; lastSeen: string; selfVerified: boolean }>;
+  autoPool: GarlicAutoPoolEntry[];
   polledAt: string;
 }
 

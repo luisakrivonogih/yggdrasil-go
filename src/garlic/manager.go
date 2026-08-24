@@ -28,7 +28,10 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	mrand "math/rand"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -91,6 +94,38 @@ type Config struct {
 	// close to this node (e.g. a direct peer) is more likely to be run
 	// by the same operator or network than one several hops away.
 	MinHopCount int
+
+	// BootstrapPeers seeds the discovery registry at startup: this node
+	// queries each entry (hex-encoded node key) for its Garlic
+	// capability and, on success, immediately requests its known-peer
+	// gossip sample (RequestGossip) - the one manual step needed before
+	// AutoCreateCircuit has anything to work with, analogous to
+	// Yggdrasil's own NodeConfig.Peers. Best-effort: an unreachable
+	// bootstrap peer is simply skipped, not retried on a tight loop.
+	BootstrapPeers []string
+
+	// AutoPoolEnabled turns on the background circuit pool + rotation +
+	// (if CoverTrafficEnabled) cover traffic. A node can still relay/
+	// terminate for another node's auto-pool circuits with this off -
+	// see CapabilityAutoCircuit's doc comment.
+	AutoPoolEnabled bool
+	// AutoPoolSize is how many circuits the pool maintains.
+	AutoPoolSize int
+	// AutoRotationInterval is how often one pool circuit (the oldest) is
+	// retired and rebuilt - never the whole pool at once.
+	AutoRotationInterval time.Duration
+
+	// CoverTrafficEnabled sends a periodic dummy payload over every
+	// auto-pool circuit, even when there's nothing real to send - raises
+	// the cost of volume-based traffic correlation for auto-pool
+	// circuits specifically (docs/garlic-threat-model.md's "Traffic
+	// correlation" section already covers the general limits of this
+	// class of defense).
+	CoverTrafficEnabled bool
+	// CoverTrafficInterval is the average spacing between cover packets
+	// per circuit, randomized ±50% per send so it isn't perfectly
+	// periodic (a fixed interval is itself a fingerprint).
+	CoverTrafficInterval time.Duration
 }
 
 // DefaultConfig returns conservative defaults suitable for a small
@@ -121,6 +156,11 @@ func DefaultConfig() Config {
 		GossipFanout:         2,
 		GossipSampleSize:     16,
 		MinHopCount:          2,
+		AutoPoolEnabled:      false,
+		AutoPoolSize:         3,
+		AutoRotationInterval: 15 * time.Minute,
+		CoverTrafficEnabled:  true,
+		CoverTrafficInterval: 75 * time.Second,
 	}
 }
 
@@ -130,12 +170,13 @@ func DefaultConfig() Config {
 const jitterWorkers = 16
 
 var (
-	ErrInvalidPath       = errors.New("garlic: invalid circuit path")
-	ErrCircuitNotFound   = errors.New("garlic: circuit not found")
-	ErrCapabilityTimeout = errors.New("garlic: capability request timed out")
-	ErrRecvTimeout       = errors.New("garlic: no message received before timeout")
-	ErrPoolNotFound      = errors.New("garlic: circuit pool not found")
-	ErrEmptyPool         = errors.New("garlic: circuit pool must have at least one path")
+	ErrInvalidPath                  = errors.New("garlic: invalid circuit path")
+	ErrCircuitNotFound              = errors.New("garlic: circuit not found")
+	ErrCapabilityTimeout            = errors.New("garlic: capability request timed out")
+	ErrRecvTimeout                  = errors.New("garlic: no message received before timeout")
+	ErrPoolNotFound                 = errors.New("garlic: circuit pool not found")
+	ErrEmptyPool                    = errors.New("garlic: circuit pool must have at least one path")
+	ErrHopMissingAutoCircuitSupport = errors.New("garlic: candidate hop does not support CapabilityAutoCircuit")
 )
 
 // DeliveredMessage is an application payload that arrived because this
@@ -144,6 +185,35 @@ type DeliveredMessage struct {
 	CircuitID CircuitID
 	Payload   []byte
 }
+
+// AutoDeliveredMessage is an application payload that arrived because
+// this node was the final hop of someone else's auto-pool circuit (see
+// AutoCreateCircuit). Kept entirely separate from DeliveredMessage/
+// g.delivered - a cover-traffic packet is silently discarded before it
+// ever reaches this type, and nothing sent via SendGarlicAuto ever
+// reaches the plain g.delivered/RecvGarlic path either.
+type AutoDeliveredMessage struct {
+	CircuitID CircuitID
+	Payload   []byte
+}
+
+// autoPayloadKindReal/autoPayloadKindCover are the leading byte of every
+// auto-pool circuit's Inner payload (see sendAutoPayload/deliverTagged) -
+// entirely internal to this node's own auto-pool traffic, invisible to
+// every intermediate hop (they never parse Inner) and meaningful only to
+// the terminal hop that decrypts it.
+const (
+	autoPayloadKindReal  byte = 0
+	autoPayloadKindCover byte = 1
+)
+
+// coverPayloadSize is the plaintext size of a cover packet's Inner
+// content before AEAD encryption. AEAD ciphertext is indistinguishable
+// from random regardless of plaintext content, and per-hop wire size is
+// independently re-randomized by Config.PaddingEnabled/PadToRandomRange
+// on top of this - a fixed small plaintext size is sufficient, no
+// crypto/rand needed here.
+const coverPayloadSize = 32
 
 // Garlic is one node's Garlic Routing Overlay state. Construct with New;
 // it registers itself with the given core.Core and is usable
@@ -161,13 +231,15 @@ type Garlic struct {
 	discovery  *discoveryRegistry
 	security   SecurityCounters
 
-	delivered chan DeliveredMessage
+	delivered     chan DeliveredMessage
+	autoDelivered chan AutoDeliveredMessage
 
 	mu              sync.Mutex
 	capabilityCache map[string]*CapabilityMessage
 	pending         map[string]chan *CapabilityMessage
 	originEphemeral map[CircuitID][]byte
 	pools           map[PoolID]*circuitPool
+	autoPool        map[CircuitID]time.Time
 
 	stop chan struct{}
 }
@@ -188,10 +260,12 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		rendezvous:      rendezvous,
 		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers),
 		delivered:       make(chan DeliveredMessage, 256),
+		autoDelivered:   make(chan AutoDeliveredMessage, 256),
 		capabilityCache: make(map[string]*CapabilityMessage),
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),
 		pools:           make(map[PoolID]*circuitPool),
+		autoPool:        make(map[CircuitID]time.Time),
 		stop:            make(chan struct{}),
 	}
 	g.scheduler = newJitterScheduler(func(data []byte, addr net.Addr) error {
@@ -200,6 +274,8 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 	}, cfg.JitterQueueSize, jitterWorkers)
 	c.SetGarlicHandler(g.handleIncoming)
 	go g.cleanupLoop()
+	go g.bootstrap()
+	go g.autoPoolLoop()
 	return g
 }
 
@@ -273,6 +349,44 @@ func (g *Garlic) gossipTick() {
 	}
 }
 
+// bootstrapMaxAttempts bounds how many times bootstrap queries a single
+// configured peer before giving up on it. A freshly-established mesh
+// connection's very first capability request commonly races the
+// underlying path discovery (see ironwood's pathfinder) and is lost -
+// every other capability-querying test in this package retries for
+// exactly this reason (see waitForCapability). Each attempt is already
+// naturally paced by Config.CapabilityTimeout, so a handful of attempts
+// is not the "tight loop" this field's doc comment disclaims - just
+// enough to not depend on winning that race on the first try.
+const bootstrapMaxAttempts = 3
+
+// bootstrap resolves Config.BootstrapPeers into self-verified discovery
+// entries: QueryCapability (records the entry as SelfVerified via
+// handleCapabilityResponse) followed by RequestGossip, per peer,
+// best-effort - up to bootstrapMaxAttempts per peer, then skipped for
+// good (not retried again until the next process restart). Called once
+// from New in its own goroutine so New itself returns immediately,
+// matching this package's existing convention.
+func (g *Garlic) bootstrap() {
+	for _, hexKey := range g.cfg.BootstrapPeers {
+		key, err := hex.DecodeString(hexKey)
+		if err != nil {
+			continue
+		}
+		var verified bool
+		for attempt := 0; attempt < bootstrapMaxAttempts; attempt++ {
+			if _, err := g.QueryCapability(key); err == nil {
+				verified = true
+				break
+			}
+		}
+		if !verified {
+			continue
+		}
+		_ = g.RequestGossip(key)
+	}
+}
+
 // GossipAnnounce sends to as a sample of this node's known Garlic peers
 // (Config.GossipSampleSize of them), so it can discover peers it hasn't
 // directly queried itself. Intended to be called with an already
@@ -291,6 +405,18 @@ func (g *Garlic) GossipAnnounce(to ed25519.PublicKey) error {
 	}
 	msg := append([]byte{msgTypeAnnounce}, body...)
 	_, err = g.core.WriteGarlic(msg, iwt.Addr(to))
+	return err
+}
+
+// RequestGossip asks peer to immediately send this node its known-peer
+// gossip sample (msgTypeAnnounceRequest, empty body) - see
+// docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §4. A peer running code without this feature simply never answers;
+// handleIncoming's switch has no default case, so an unrecognized type
+// byte is already silently ignored (Go zero-value switch fallthrough) -
+// no capability check needed before sending this specific message.
+func (g *Garlic) RequestGossip(peer ed25519.PublicKey) error {
+	_, err := g.core.WriteGarlic([]byte{msgTypeAnnounceRequest}, iwt.Addr(peer))
 	return err
 }
 
@@ -326,6 +452,7 @@ func (g *Garlic) candidatePool() []HopCandidate {
 			GarlicPublicKey: p.GarlicPublicKey,
 			HopCount:        hops,
 			TreeParent:      parentOf[string(p.NodeKey)],
+			SelfVerified:    p.SelfVerified,
 		})
 	}
 	return pool
@@ -338,6 +465,383 @@ func (g *Garlic) candidatePool() []HopCandidate {
 // discovered/gossiped entry has gone stale.
 func (g *Garlic) SelectPath(n int) ([]HopCandidate, error) {
 	return SelectDiversePath(g.candidatePool(), n, g.cfg.MinHopCount)
+}
+
+// AutoCreateCircuit builds an n-hop circuit entirely from this node's
+// discovery pool: SelectPathWithGuardPolicy chooses hops (first from
+// self-verified candidates only), each is re-verified via QueryCapability
+// (catching a stale/never-directly-contacted gossiped candidate before
+// it's used, same as the manual createGarlicCircuit admin RPC already
+// does - note QueryCapability reuses a cached answer when it has one, so
+// this is not necessarily a fresh round trip per hop), and every hop must
+// additionally advertise
+// CapabilityAutoCircuit - see
+// docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §6/§8 for why every position, not just the terminal one, is gated.
+func (g *Garlic) AutoCreateCircuit(n int) (CircuitID, error) {
+	hops, err := SelectPathWithGuardPolicy(g.candidatePool(), n, g.cfg.MinHopCount)
+	if err != nil {
+		return CircuitID{}, err
+	}
+
+	path := make([]CapabilityMessage, len(hops))
+	nodeKeys := make([][]byte, len(hops))
+	for i, h := range hops {
+		capability, err := g.QueryCapability(h.NodeKey)
+		if err != nil {
+			return CircuitID{}, fmt.Errorf("hop %d: %w", i, err)
+		}
+		if !capability.SupportsAutoCircuit() {
+			return CircuitID{}, fmt.Errorf("hop %d: %w", i, ErrHopMissingAutoCircuitSupport)
+		}
+		path[i] = *capability
+		nodeKeys[i] = h.NodeKey
+	}
+	return g.CreateCircuit(path, nodeKeys)
+}
+
+// AutoPoolEntry is a point-in-time summary of one auto-pool circuit, for
+// the getGarlicAutoPool admin RPC / dashboard.
+type AutoPoolEntry struct {
+	ID        CircuitID
+	CreatedAt time.Time
+	HopCount  int
+}
+
+// pruneAutoPool drops entries whose circuit is no longer tracked by
+// CircuitManager - closed explicitly, or reaped by ExpireStale. Every
+// size decision below depends on this running first, since an entry
+// surviving in g.autoPool past its circuit's real lifetime would be
+// counted as live.
+//
+// Lock order: g.mu is taken first, then CircuitManager's own internal
+// mutex inside Get. CircuitManager holds no reference to *Garlic and
+// never calls back into it (see circuit_manager.go), so no code path
+// takes those two locks in the opposite order and this cannot deadlock.
+func (g *Garlic) pruneAutoPool() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id := range g.autoPool {
+		if _, ok := g.circuits.Get(id); !ok {
+			delete(g.autoPool, id)
+		}
+	}
+}
+
+// AutoPoolStatus returns every circuit currently managed by the auto-pool
+// loop, sorted by ascending circuit ID for stable admin/dashboard output
+// (same reasoning as CircuitManager.List's doc comment). Entries whose
+// circuit is already gone are pruned first, so this never reports a
+// phantom circuit to an operator or the dashboard.
+func (g *Garlic) AutoPoolStatus() []AutoPoolEntry {
+	g.pruneAutoPool()
+
+	g.mu.Lock()
+	entries := make([]AutoPoolEntry, 0, len(g.autoPool))
+	for id, at := range g.autoPool {
+		entries = append(entries, AutoPoolEntry{ID: id, CreatedAt: at})
+	}
+	g.mu.Unlock()
+
+	for i := range entries {
+		if c, ok := g.circuits.Get(entries[i].ID); ok {
+			entries[i].HopCount = len(c.HopKeys())
+		}
+	}
+	slices.SortFunc(entries, func(a, b AutoPoolEntry) int { return bytes.Compare(a.ID[:], b.ID[:]) })
+	return entries
+}
+
+// fillAutoPool adds at most *one* circuit to the auto-pool, and only if
+// the pool is below Config.AutoPoolSize. Best-effort: a candidate
+// shortage (ErrNoSelfVerifiedCandidates, ErrInsufficientDiverseCandidates,
+// or any other AutoCreateCircuit failure) just leaves the pool under
+// target until more peers are discovered - no tight retry loop. Pruned
+// first, so a pool full of entries whose circuits have already been
+// reaped is correctly seen as depleted and actually refilled.
+//
+// One per call, not "loop until full", is deliberate and is the same
+// "never all at once" anti-correlation property rotateAutoPool's doc
+// comment describes, applied to backfill. Building the whole pool inside
+// a single call gives every pool circuit (approximately) one shared
+// creation instant, and therefore one shared expiry instant
+// Config.CircuitLifetime later: CircuitManager.ExpireStale reaps them in
+// the same pass, the maintenance ticker rebuilds them all inside one
+// tick, and the node emits a phase-locked burst of Config.AutoPoolSize
+// simultaneous circuit builds once per CircuitLifetime, forever - a
+// standing fingerprint tying those otherwise unrelated circuits to one
+// originator. Topping up one circuit per call instead leans on
+// autoPoolLoop's existing autoPoolFillRetryInterval maintenance cadence
+// (which already fires repeatedly while the pool is below target) to
+// finish the job over several ticks, which spreads creation - and hence
+// expiry - across roughly (AutoPoolSize-1) x autoPoolFillRetryInterval
+// with no separate per-circuit lifetime jitter needed.
+//
+// The tradeoff is that a cold start reaches full pool size a few seconds
+// later than it otherwise would, since autoPoolLoop's one synchronous
+// pre-loop call now creates a single circuit rather than all of them.
+// That is accepted deliberately: nothing depends on the pool being at
+// target size immediately, and cover traffic and SendGarlicAuto both
+// work fine over a partially filled pool.
+func (g *Garlic) fillAutoPool() {
+	g.pruneAutoPool()
+
+	g.mu.Lock()
+	n := len(g.autoPool)
+	g.mu.Unlock()
+	if n >= g.cfg.AutoPoolSize {
+		return
+	}
+
+	id, err := g.AutoCreateCircuit(g.cfg.PathLength)
+	if err != nil {
+		return
+	}
+	g.mu.Lock()
+	g.autoPool[id] = time.Now()
+	g.mu.Unlock()
+}
+
+// rotateAutoPool retires exactly one pool circuit (the oldest) per call
+// and immediately tries to build one replacement (fillAutoPool adds at
+// most one circuit per call) - never the whole pool at once, so a
+// rotation tick isn't itself a burst-of-circuit-builds fingerprint (see
+// the design doc §7).
+func (g *Garlic) rotateAutoPool() {
+	g.mu.Lock()
+	var oldestID CircuitID
+	var oldestAt time.Time
+	first := true
+	for id, at := range g.autoPool {
+		if first || at.Before(oldestAt) {
+			oldestID, oldestAt, first = id, at, false
+		}
+	}
+	g.mu.Unlock()
+
+	if first {
+		g.fillAutoPool()
+		return
+	}
+
+	g.CloseCircuit(oldestID)
+	g.mu.Lock()
+	delete(g.autoPool, oldestID)
+	g.mu.Unlock()
+	g.fillAutoPool()
+}
+
+// coverTrafficStagger returns one independently-drawn delay, uniform over
+// [0, Config.CoverTrafficInterval), used to spread a single round of
+// cover sends across the whole interval. Drawn separately per circuit -
+// that independence is the entire point, so two pool circuits' cover
+// packets are not scheduled for the same instant.
+func (g *Garlic) coverTrafficStagger() time.Duration {
+	span := int64(g.cfg.CoverTrafficInterval)
+	if span <= 0 {
+		return 0
+	}
+	return time.Duration(mrand.Int63n(span))
+}
+
+// sendCoverTraffic schedules one autoPayloadKindCover packet over every
+// circuit currently in the auto-pool, each at its own independently drawn
+// offset within Config.CoverTrafficInterval (coverTrafficStagger) rather
+// than all at once.
+//
+// The staggering is the security-relevant part, not an optimization: with
+// a shared timer and a tight send loop, an observer watching this node's
+// links sees Config.AutoPoolSize cover packets leave for
+// Config.AutoPoolSize *different* first hops within one scheduling
+// instant, which is itself a correlation signal tying those otherwise
+// unrelated circuits to one originator - the same "never all at once"
+// concern rotateAutoPool's doc comment describes, applied to cover
+// traffic. Design spec §8 requires per-circuit independent jitter for
+// exactly this reason.
+//
+// Sends are best-effort and fire-and-forget: a failure (a hop temporarily
+// unreachable, or the circuit rotated/expired out from under the pending
+// timer) is not retried here; the next scheduled round tries again.
+// Nothing needs cancelling at Close beyond the g.stop check below -
+// time.AfterFunc's goroutine is short-lived and does not outlive its one
+// send attempt, and sendAutoPayload already fails cleanly
+// (ErrCircuitNotFound) on a circuit that no longer exists.
+func (g *Garlic) sendCoverTraffic() {
+	g.mu.Lock()
+	ids := make([]CircuitID, 0, len(g.autoPool))
+	for id := range g.autoPool {
+		ids = append(ids, id)
+	}
+	g.mu.Unlock()
+
+	for _, id := range ids {
+		time.AfterFunc(g.coverTrafficStagger(), func() {
+			select {
+			case <-g.stop:
+				return
+			default:
+			}
+			_ = g.sendAutoPayload(id, autoPayloadKindCover, make([]byte, coverPayloadSize))
+		})
+	}
+}
+
+// coverTrafficDelay returns Config.CoverTrafficInterval jittered ±50%,
+// setting how often a *round* of cover sends is scheduled. Within a
+// round, each circuit's actual send is independently offset again by
+// coverTrafficStagger, so this only paces the rounds - it is not itself
+// what keeps two circuits' packets from coinciding.
+func (g *Garlic) coverTrafficDelay() time.Duration {
+	base := g.cfg.CoverTrafficInterval
+	if base <= 0 {
+		return time.Second
+	}
+	jitterRange := int64(base) // ±50% of base = a uniform draw over [0.5*base, 1.5*base]
+	offset := mrand.Int63n(jitterRange) - jitterRange/2
+	d := time.Duration(int64(base) + offset)
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// autoPoolFillRetryInterval bounds how long autoPoolLoop waits before
+// retrying fillAutoPool while the pool is still below Config.AutoPoolSize
+// - deliberately decoupled from (and typically much shorter than)
+// Config.AutoRotationInterval, which governs the steady-state cadence
+// once the pool is already at target size. Without this, a freshly
+// started node whose very first fillAutoPool call races
+// bootstrap/discovery convergence (see bootstrapMaxAttempts's doc
+// comment for the same class of mesh-convergence race) and loses would
+// otherwise not retry again until a full AutoRotationInterval had
+// elapsed - 15 minutes with the default config - even though candidates
+// became available moments later. rotateAutoPool's "one circuit at a
+// time" anti-fingerprint concern (see its doc comment) is specifically
+// about steady-state rotation of an already-full pool; it doesn't apply
+// to simply catching a still-filling pool up to target, so a faster
+// cadence here doesn't undermine it.
+const autoPoolFillRetryInterval = 2 * time.Second
+
+// nextAutoPoolInterval picks how long autoPoolLoop should wait before its
+// next fill-or-rotate action: autoPoolFillRetryInterval while the pool is
+// below Config.AutoPoolSize, Config.AutoRotationInterval (floored at one
+// second) once it's already full. Read fresh every time the rotate/fill
+// timer fires (never on an unrelated loop wakeup - see autoPoolLoop),
+// since belowTarget can only change as a result of that same fire, or of
+// the pruning this does first.
+//
+// Note the deliberate relationship between the two configured periods:
+// Config.AutoRotationInterval (15m by default) is *longer* than
+// Config.CircuitLifetime (10m), so rotation is never what keeps the pool
+// populated - pool circuits reach their own expiry and are reaped by
+// CircuitManager.ExpireStale well before a rotation tick is due. Expiry-
+// driven backfill (pruneAutoPool making belowTarget true, then this
+// function's autoPoolFillRetryInterval catch-up cadence, driven by
+// autoPoolLoop's maintenance ticker) is the primary refresh mechanism;
+// rotation only adds anonymity-motivated turnover of an otherwise-healthy
+// pool on top of it. Do not "fix" the ordering by shortening
+// AutoRotationInterval below CircuitLifetime - that would make rotation
+// fire against circuits that are still perfectly good, which is exactly
+// the burst-of-rebuilds fingerprint rotateAutoPool's doc comment guards
+// against.
+func (g *Garlic) nextAutoPoolInterval() time.Duration {
+	g.pruneAutoPool()
+
+	g.mu.Lock()
+	belowTarget := len(g.autoPool) < g.cfg.AutoPoolSize
+	g.mu.Unlock()
+	interval := max(g.cfg.AutoRotationInterval, time.Second)
+	if belowTarget {
+		interval = min(interval, autoPoolFillRetryInterval)
+	}
+	return interval
+}
+
+// autoPoolLoop maintains the auto-pool (fill on start, then keep filling
+// on autoPoolFillRetryInterval - one circuit per call, see fillAutoPool -
+// until the pool reaches Config.AutoPoolSize; once full, rotate one
+// circuit at a time on Config.AutoRotationInterval) and, if
+// Config.CoverTrafficEnabled, sends
+// jittered cover traffic over every pool circuit. No-op entirely if
+// Config.AutoPoolEnabled is false - a node can still relay/terminate for
+// other nodes' auto-pool circuits without running this loop itself.
+//
+// Both timers - the rotate/fill timer and the cover-traffic timer - are
+// created once, before the loop, and only ever Reset from inside their
+// own case; neither is ever recreated on an unrelated wakeup. Recreating
+// a timer at the top of every iteration restarts its countdown from zero
+// each time some *other* case fires first, so any timer whose period is
+// longer than this loop's fastest wakeup source would starve and never
+// fire at all. That is not hypothetical here: the maintenance ticker
+// described below wakes the loop every autoPoolFillRetryInterval (2s)
+// unconditionally, which is shorter than Config.AutoRotationInterval and
+// - at every realistic setting, including the 75s default - shorter than
+// Config.CoverTrafficInterval too. Resetting coverTimer from within its
+// own case still rerolls its delay freshly for every round, which is
+// what coverTrafficDelay's per-round jitter needs; nothing about that
+// jitter requires a brand-new Timer.
+//
+// A third, backfill-only maintenance ticker runs at
+// autoPoolFillRetryInterval. It exists because circuits leave the pool on
+// their own schedule (Config.CircuitLifetime, reaped by
+// CircuitManager.ExpireStale from cleanupLoop) rather than on the
+// rotate/fill timer's, and with the default config that expiry happens
+// well before a rotation tick is due - see nextAutoPoolInterval's doc
+// comment. Without a wakeup of its own, the loop would not even notice
+// the pool had emptied until the next rotation tick, leaving the pool
+// (and therefore cover traffic) dead for the difference between the two
+// periods. It deliberately never rotates: rotation cadence stays exactly
+// Config.AutoRotationInterval, and this only tops a depleted pool back up.
+func (g *Garlic) autoPoolLoop() {
+	if !g.cfg.AutoPoolEnabled {
+		return
+	}
+	g.fillAutoPool()
+
+	rotateTimer := time.NewTimer(g.nextAutoPoolInterval())
+	defer rotateTimer.Stop()
+
+	maintTicker := time.NewTicker(autoPoolFillRetryInterval)
+	defer maintTicker.Stop()
+
+	// A nil coverC blocks forever in the select below, so cover traffic
+	// being disabled simply means that case never becomes ready.
+	var coverTimer *time.Timer
+	var coverC <-chan time.Time
+	if g.cfg.CoverTrafficEnabled {
+		coverTimer = time.NewTimer(g.coverTrafficDelay())
+		defer coverTimer.Stop()
+		coverC = coverTimer.C
+	}
+
+	for {
+		select {
+		case <-rotateTimer.C:
+			g.pruneAutoPool()
+			g.mu.Lock()
+			belowTarget := len(g.autoPool) < g.cfg.AutoPoolSize
+			g.mu.Unlock()
+			if belowTarget {
+				g.fillAutoPool()
+			} else {
+				g.rotateAutoPool()
+			}
+			rotateTimer.Reset(g.nextAutoPoolInterval())
+		case <-maintTicker.C:
+			g.pruneAutoPool()
+			g.mu.Lock()
+			belowTarget := len(g.autoPool) < g.cfg.AutoPoolSize
+			g.mu.Unlock()
+			if belowTarget {
+				g.fillAutoPool()
+			}
+		case <-coverC:
+			g.sendCoverTraffic()
+			coverTimer.Reset(g.coverTrafficDelay())
+		case <-g.stop:
+			return
+		}
+	}
 }
 
 // Identity returns this node's long-term Garlic identity.
@@ -362,13 +866,17 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 	case msgTypeCapabilityResponse:
 		g.handleCapabilityResponse(from, data[1:])
 	case msgTypeCircuitData:
-		g.dispatchAction(g.processCircuitData(data[1:]), from)
+		g.dispatchAction(g.processCircuitData(data[1:], msgTypeCircuitData), from)
 	case msgTypeAnnounce:
 		g.processAnnounce(data[1:])
 	case msgTypeCircuitDataBundle:
 		for _, action := range g.processCircuitDataBundle(data[1:]) {
 			g.dispatchAction(action, from)
 		}
+	case msgTypeAnnounceRequest:
+		_ = g.GossipAnnounce(from)
+	case msgTypeCircuitDataV3:
+		g.dispatchAction(g.processCircuitData(data[1:], msgTypeCircuitDataV3), from)
 	}
 }
 
@@ -380,6 +888,10 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 func (g *Garlic) dispatchAction(action circuitAction, from ed25519.PublicKey) {
 	switch action.kind {
 	case actionDeliver:
+		if action.tagged {
+			g.deliverTagged(action.circuitID, action.payload)
+			return
+		}
 		select {
 		case g.delivered <- DeliveredMessage{CircuitID: action.circuitID, Payload: action.payload}:
 		default:
@@ -387,6 +899,28 @@ func (g *Garlic) dispatchAction(action circuitAction, from ed25519.PublicKey) {
 	case actionForward:
 		g.relayState.recordForward(action.circuitID, from, action.forwardTo, len(action.forwardMsg))
 		g.sendCircuitData(action.forwardMsg, iwt.Addr(action.forwardTo))
+	}
+}
+
+// deliverTagged interprets a msgTypeCircuitDataV3 delivery's leading kind
+// byte: a cover packet (autoPayloadKindCover) is silently discarded here
+// - the whole point of continuous cover traffic is that it travels the
+// full circuit depth and looks exactly like real traffic to every hop,
+// including this delivery step, right up until this one deliberate
+// discard. A malformed payload (empty, or an unrecognized kind byte) is
+// dropped the same way any other malformed Garlic input is - no error,
+// no observable difference from a legitimate cover discard.
+func (g *Garlic) deliverTagged(id CircuitID, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	kind, real := payload[0], payload[1:]
+	if kind != autoPayloadKindReal {
+		return
+	}
+	select {
+	case g.autoDelivered <- AutoDeliveredMessage{CircuitID: id, Payload: append([]byte(nil), real...)}:
+	default:
 	}
 }
 
@@ -398,6 +932,26 @@ func (g *Garlic) RelayCircuits() []RelayCircuitInfo {
 	return g.relayState.snapshot()
 }
 
+// handleCapabilityResponse processes an inbound msgTypeCapabilityResponse.
+//
+// SelfVerified is recorded true only when g.pending[key] is set, i.e. a
+// capability request this node itself sent (requestCapability) is still
+// outstanding for that exact key. This gate is what makes the flag mean
+// what discovery.go and docs/garlic-threat-model.md claim it means -
+// "this node completed a handshake it initiated" - rather than merely
+// "some key sent this node a well-formed packet". handleIncoming
+// dispatches this message type for any peer that can open an ironwood
+// session, so without the gate a single unsolicited response would
+// permanently grant first-hop-guard eligibility (discoveryRegistry.record
+// never downgrades SelfVerified back to false), defeating
+// SelectPathWithGuardPolicy's whole purpose.
+//
+// An unsolicited - or too-late, after this node's own CapabilityTimeout
+// already cleared g.pending - response is still worth remembering as an
+// ordinary, gossip-tier discovery candidate: it grants no more trust than
+// a msgTypeAnnounce entry the same peer could already inject itself via
+// processAnnounce, and it still has to pass a real, this-node-initiated
+// QueryCapability before it can be used as a hop.
 func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 	msg, err := UnmarshalCapabilityMessage(body)
 	if err != nil {
@@ -414,7 +968,11 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 	// verification discovery candidates need before they're worth
 	// remembering - see discovery.go's doc comment.
 	if msg.SupportsGarlicV2() && len(msg.PublicKey) > 0 {
-		g.discovery.record(DiscoveredPeer{NodeKey: append([]byte(nil), from...), GarlicPublicKey: msg.PublicKey})
+		g.discovery.record(DiscoveredPeer{
+			NodeKey:         append([]byte(nil), from...),
+			GarlicPublicKey: msg.PublicKey,
+			SelfVerified:    ch != nil,
+		})
 	}
 
 	if ch != nil {
@@ -759,6 +1317,62 @@ func buildCircuitDataBody(ephemeralPub []byte, id CircuitID, counter, expiration
 func (g *Garlic) RecvGarlic(timeout time.Duration) (*DeliveredMessage, error) {
 	select {
 	case m := <-g.delivered:
+		return &m, nil
+	case <-time.After(timeout):
+		return nil, ErrRecvTimeout
+	}
+}
+
+// sendAutoPayload seals a kind-tagged payload (see autoPayloadKindReal/
+// autoPayloadKindCover) over circuit id and sends it as
+// msgTypeCircuitDataV3 - the shared plumbing behind both SendGarlicAuto
+// and the cover-traffic scheduler (Task 11). Mirrors SendGarlic's shape
+// exactly except for the tag byte and the V3 outer type.
+func (g *Garlic) sendAutoPayload(id CircuitID, kind byte, payload []byte) error {
+	c, ok := g.circuits.Get(id)
+	if !ok {
+		return ErrCircuitNotFound
+	}
+	g.mu.Lock()
+	ephemeralPub := g.originEphemeral[id]
+	g.mu.Unlock()
+	if ephemeralPub == nil {
+		return ErrCircuitNotFound
+	}
+
+	tagged := make([]byte, 0, 1+len(payload))
+	tagged = append(tagged, kind)
+	tagged = append(tagged, payload...)
+
+	onion, firstHop, counter, err := c.Seal(tagged)
+	if err != nil {
+		return err
+	}
+	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
+	body, err := buildCircuitDataBody(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	if err != nil {
+		return err
+	}
+
+	g.sendCircuitData(append([]byte{msgTypeCircuitDataV3}, body...), iwt.Addr(firstHop))
+	return nil
+}
+
+// SendGarlicAuto sends a real application payload over an auto-pool
+// circuit (previously created with AutoCreateCircuit). Delivered on the
+// remote end via RecvGarlicAuto/g.autoDelivered - never the plain
+// SendGarlic/RecvGarlic path, even if the same circuit ID were somehow
+// reused (it can't be - auto-pool and manual circuits are never the
+// same CircuitManager entry shared between the two APIs).
+func (g *Garlic) SendGarlicAuto(id CircuitID, payload []byte) error {
+	return g.sendAutoPayload(id, autoPayloadKindReal, payload)
+}
+
+// RecvGarlicAuto waits up to timeout for the next real (non-cover)
+// payload delivered to this node as an auto-pool circuit's final hop.
+func (g *Garlic) RecvGarlicAuto(timeout time.Duration) (*AutoDeliveredMessage, error) {
+	select {
+	case m := <-g.autoDelivered:
 		return &m, nil
 	case <-time.After(timeout):
 		return nil, ErrRecvTimeout

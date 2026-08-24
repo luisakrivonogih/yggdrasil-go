@@ -19,9 +19,15 @@ package garlic
 // raises the bar above "pick uniformly at random" or "pick whatever
 // answered first" for the common case of a few nearby colluding nodes.
 
-import "errors"
+import (
+	"bytes"
+	"errors"
+)
 
-var ErrInsufficientDiverseCandidates = errors.New("garlic: not enough topologically diverse candidates")
+var (
+	ErrInsufficientDiverseCandidates = errors.New("garlic: not enough topologically diverse candidates")
+	ErrNoSelfVerifiedCandidates      = errors.New("garlic: no self-verified candidates available for the first hop")
+)
 
 // HopCandidate is one candidate for SelectDiversePath, combining a
 // discovered peer's identity with topology data about it.
@@ -30,6 +36,7 @@ type HopCandidate struct {
 	GarlicPublicKey []byte
 	HopCount        int
 	TreeParent      []byte // this candidate's immediate parent in core.Core.GetTree(), if known
+	SelfVerified    bool   // mirrors DiscoveredPeer.SelfVerified - see discovery.go
 }
 
 // SelectDiversePath greedily selects n candidates from pool: sorted by
@@ -41,6 +48,14 @@ type HopCandidate struct {
 // entirely. Returns ErrInsufficientDiverseCandidates if fewer than n
 // candidates can be selected under these constraints.
 func SelectDiversePath(pool []HopCandidate, n, minHopCount int) ([]HopCandidate, error) {
+	return selectDiversePathFrom(pool, n, minHopCount, map[string]bool{})
+}
+
+// selectDiversePathFrom is SelectDiversePath's implementation, taking an
+// already-populated usedParents set so a caller (SelectPathWithGuardPolicy)
+// can seed it with tree parents used by hops chosen in an earlier stage -
+// diversity then holds across both stages, not just within either one.
+func selectDiversePathFrom(pool []HopCandidate, n, minHopCount int, usedParents map[string]bool) ([]HopCandidate, error) {
 	candidates := make([]HopCandidate, 0, len(pool))
 	for _, c := range pool {
 		if c.HopCount >= minHopCount {
@@ -50,7 +65,6 @@ func SelectDiversePath(pool []HopCandidate, n, minHopCount int) ([]HopCandidate,
 	sortByHopCountDescending(candidates)
 
 	selected := make([]HopCandidate, 0, n)
-	usedParents := make(map[string]bool, n)
 	for _, c := range candidates {
 		if len(selected) == n {
 			break
@@ -79,4 +93,48 @@ func sortByHopCountDescending(c []HopCandidate) {
 			c[j], c[j-1] = c[j-1], c[j]
 		}
 	}
+}
+
+// SelectPathWithGuardPolicy chooses n circuit hops the same way
+// SelectDiversePath does, with one added rule: the first hop (position
+// 0) is drawn only from self-verified candidates - the position most
+// sensitive to Sybil/deanonymization risk (docs/garlic-threat-model.md's
+// Sybil section). Remaining hops are drawn from the full pool
+// (self-verified + gossiped), diversity-checked against the guard's tree
+// parent too, so hop 1 can't share it either. No persistence across
+// calls - the guard is re-selected every call, by design (see
+// docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
+// §3, "no Tor-style guard pinning").
+func SelectPathWithGuardPolicy(pool []HopCandidate, n, minHopCount int) ([]HopCandidate, error) {
+	if n <= 0 {
+		return nil, ErrInsufficientDiverseCandidates
+	}
+
+	selfVerified := make([]HopCandidate, 0, len(pool))
+	for _, c := range pool {
+		if c.SelfVerified {
+			selfVerified = append(selfVerified, c)
+		}
+	}
+	usedParents := map[string]bool{}
+	guard, err := selectDiversePathFrom(selfVerified, 1, minHopCount, usedParents)
+	if err != nil {
+		return nil, ErrNoSelfVerifiedCandidates
+	}
+	if n == 1 {
+		return guard, nil
+	}
+
+	rest := make([]HopCandidate, 0, len(pool))
+	for _, c := range pool {
+		if bytes.Equal(c.NodeKey, guard[0].NodeKey) {
+			continue
+		}
+		rest = append(rest, c)
+	}
+	remaining, err := selectDiversePathFrom(rest, n-1, minHopCount, usedParents)
+	if err != nil {
+		return nil, err
+	}
+	return append(guard, remaining...), nil
 }

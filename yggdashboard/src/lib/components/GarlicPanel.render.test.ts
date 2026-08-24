@@ -21,9 +21,31 @@ const EMPTY_STATS: GarlicResponse['stats'] = {
 describe('GarlicPanel render', () => {
   it('shows the disabled explanation and no identity/security sections when Garlic is off', () => {
     render(GarlicPanel, {
-      props: { garlic: { enabled: false, identity: null, stats: EMPTY_STATS, knownPeers: [], polledAt: '' } }
+      props: { garlic: { enabled: false, identity: null, stats: EMPTY_STATS, knownPeers: [], autoPool: [], polledAt: '' } }
     });
     expect(screen.getByText(/Garlic is disabled on this node/)).toBeInTheDocument();
     expect(screen.queryByText('Security')).not.toBeInTheDocument();
+  });
+
+  it('shows the auto-pool status panel and a self-verified/gossiped badge per known-peer row', () => {
+    render(GarlicPanel, {
+      props: {
+        garlic: {
+          enabled: true,
+          identity: { publicKey: 'garlic-pub' },
+          stats: EMPTY_STATS,
+          knownPeers: [
+            { nodeKey: 'peer-verified', garlicPublicKey: 'gpk1', lastSeen: '2026-08-10T00:00:00.000Z', selfVerified: true },
+            { nodeKey: 'peer-gossiped', garlicPublicKey: 'gpk2', lastSeen: '2026-08-10T00:00:00.000Z', selfVerified: false }
+          ],
+          autoPool: [{ circuitId: 'circuit-1', createdAt: '2026-08-10T00:00:00.000Z', hops: 3 }],
+          polledAt: ''
+        }
+      }
+    });
+
+    expect(screen.getByText('Auto-built circuit pool (1)')).toBeInTheDocument();
+    expect(screen.getByText('Self-verified')).toBeInTheDocument();
+    expect(screen.getByText('Gossiped')).toBeInTheDocument();
   });
 });

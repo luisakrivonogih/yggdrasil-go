@@ -123,6 +123,16 @@ func TestConfig_Keys(t *testing.T) {
 	*/
 }
 
+func TestGenerateConfigSetsGarlicAutoPoolDefaults(t *testing.T) {
+	cfg := GenerateConfig()
+	if cfg.Garlic.AutoPoolSize != 3 {
+		t.Errorf("Garlic.AutoPoolSize = %d, want 3", cfg.Garlic.AutoPoolSize)
+	}
+	if !cfg.Garlic.CoverTrafficEnabled {
+		t.Error("Garlic.CoverTrafficEnabled = false, want true (default-on per design decision)")
+	}
+}
+
 func TestDashboardConfigDefaults(t *testing.T) {
 	cfg := GenerateConfig()
 	if cfg.Dashboard.Enabled {

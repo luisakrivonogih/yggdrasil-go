@@ -17,6 +17,8 @@ package garlic_test
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
+	"errors"
 	"io"
 	"net/url"
 	"testing"
@@ -280,6 +282,76 @@ func TestIntegrationGossipDiscoversUnknownPeer(t *testing.T) {
 	}
 }
 
+func TestIntegrationAnnounceRequestTriggersImmediateGossipAnnounce(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	nodeC := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB, nodeC}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all) // A -- B -- C
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	idC, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (C) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gC := garlic.New(nodeC, idC, cfg, garlic.NewStaticRendezvous())
+	defer gC.Close()
+
+	// B learns about C directly. A learns about B directly, but never
+	// queries C, and critically: B never queries A either, so (unlike
+	// TestIntegrationGossipDiscoversUnknownPeer) A is NOT in B's
+	// capabilityCache and B's periodic gossipTick would never target A.
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+	waitForCapability(t, gB, nodeC.PublicKey(), 60*time.Second)
+
+	for _, p := range gA.KnownPeers() {
+		if bytes.Equal(p.NodeKey, nodeC.PublicKey()) {
+			t.Fatal("A already knows about C before any gossip happened - test setup is invalid")
+		}
+	}
+
+	if err := gA.RequestGossip(nodeB.PublicKey()); err != nil {
+		t.Fatalf("RequestGossip returned error: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeC.PublicKey()) && bytes.Equal(p.GarlicPublicKey, idC.PublicKey) {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A never learned about C via RequestGossip's pull within the deadline; known peers: %+v", gA.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestIntegrationSelectPathAgainstRealTopology proves SelectPath's
 // core.Core.GetTree()/GetPaths() integration works against a real mesh,
 // not just SelectDiversePath's already-unit-tested selection algorithm
@@ -351,6 +423,49 @@ func TestIntegrationSelectPathAgainstRealTopology(t *testing.T) {
 	}
 	if len(hop.GarlicPublicKey) == 0 {
 		t.Fatal("selected hop has no GarlicPublicKey - candidatePool didn't carry real discovery data through")
+	}
+}
+
+func TestIntegrationCandidatePoolCarriesSelfVerifiedThrough(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+
+	connectChain(t, all) // A -- B
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0 // A and B are direct peers here (hop count 1), below the default distance filter
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	// A directly capability-queries B, which resolves a real mesh path
+	// AND records B as self-verified (Task 1/2's handleCapabilityResponse
+	// change).
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+
+	selected, err := gA.SelectPath(1)
+	if err != nil {
+		t.Fatalf("SelectPath returned error: %v", err)
+	}
+	if len(selected) != 1 || !selected[0].SelfVerified {
+		t.Fatalf("SelectPath(1) = %+v, want one self-verified candidate (B, directly queried by A)", selected)
 	}
 }
 
@@ -481,6 +596,667 @@ func TestIntegrationSendGarlicBundledDeliversAmongCover(t *testing.T) {
 	// decrypt into a delivery.
 	if extra, err := gB.RecvGarlic(500 * time.Millisecond); err == nil {
 		t.Fatalf("unexpected second delivery: %+v", extra)
+	}
+}
+
+// TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips proves the
+// tagged auto-pool delivery path (SendGarlicAuto -> msgTypeCircuitDataV3
+// -> deliverTagged -> g.autoDelivered -> RecvGarlicAuto) round-trips a
+// real payload over a real mesh, and - just as importantly - that this
+// traffic never surfaces on B's plain RecvGarlic/g.delivered channel,
+// which the existing SendGarlic/RecvGarlic path uses instead.
+func TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	capB := waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+	if !capB.SupportsAutoCircuit() {
+		t.Fatal("B's capability response does not advertise CapabilityAutoCircuit")
+	}
+
+	circuitID, err := gA.CreateCircuit([]garlic.CapabilityMessage{*capB}, [][]byte{nodeB.PublicKey()})
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+
+	if err := gA.SendGarlicAuto(circuitID, []byte("auto-hello")); err != nil {
+		t.Fatalf("SendGarlicAuto returned error: %v", err)
+	}
+	msg, err := gB.RecvGarlicAuto(10 * time.Second)
+	if err != nil {
+		t.Fatalf("RecvGarlicAuto returned error: %v", err)
+	}
+	if string(msg.Payload) != "auto-hello" {
+		t.Fatalf("Payload = %q, want %q", msg.Payload, "auto-hello")
+	}
+	if msg.CircuitID != circuitID {
+		t.Fatalf("CircuitID = %x, want %x", msg.CircuitID, circuitID)
+	}
+
+	// Nothing sent via SendGarlicAuto should ever surface on B's plain
+	// RecvGarlic channel.
+	if _, err := gB.RecvGarlic(200 * time.Millisecond); !errors.Is(err, garlic.ErrRecvTimeout) {
+		t.Fatalf("RecvGarlic err = %v, want ErrRecvTimeout (auto-pool traffic must stay off the manual delivery channel)", err)
+	}
+}
+
+func TestIntegrationBootstrapPeersRecordedAsSelfVerified(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	// B must exist and be Garlic-capable before A starts, since A's
+	// bootstrap step (launched from New, best-effort) queries it once.
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found := false
+		for _, p := range gA.KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodeB.PublicKey()) && p.SelfVerified {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A never recorded its configured BootstrapPeers entry as self-verified; known peers: %+v", gA.KnownPeers())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestIntegrationAutoCreateCircuitUsesSelfVerifiedGuard(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0 // this tiny topology has no room for a real distance filter
+
+	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	waitForCapability(t, gA, nodeB.PublicKey(), 60*time.Second)
+
+	id, err := gA.AutoCreateCircuit(1)
+	if err != nil {
+		t.Fatalf("AutoCreateCircuit returned error: %v", err)
+	}
+
+	var found *garlic.Circuit
+	for _, c := range gA.OriginatedCircuits() {
+		if c.ID == id {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatal("AutoCreateCircuit's returned ID is not in OriginatedCircuits()")
+	}
+	hops := found.HopKeys()
+	if len(hops) != 1 || !bytes.Equal(hops[0], nodeB.PublicKey()) {
+		t.Fatalf("hops = %x, want [%x] (B, the only self-verified candidate)", hops, nodeB.PublicKey())
+	}
+}
+
+func TestIntegrationAutoCreateCircuitFailsWithoutSelfVerifiedCandidate(t *testing.T) {
+	nodeA := newLinkedTestNode(t) // deliberately unpeered - candidatePool() will be empty
+	defer nodeA.Stop()
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	gA := garlic.New(nodeA, idA, garlic.DefaultConfig(), garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	if _, err := gA.AutoCreateCircuit(1); !errors.Is(err, garlic.ErrNoSelfVerifiedCandidates) {
+		t.Fatalf("err = %v, want ErrNoSelfVerifiedCandidates", err)
+	}
+}
+
+func TestIntegrationAutoPoolFillsToTargetSize(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = 1
+	cfgA.CoverTrafficEnabled = false // isolate fill/rotate behavior from cover-traffic noise
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if len(gA.AutoPoolStatus()) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size 1; status: %+v", gA.AutoPoolStatus())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestIntegrationAutoPoolFillStaggersCircuitCreation is the regression
+// test for expiry-driven backfill rebuilding the whole pool as one
+// synchronized burst.
+//
+// fillAutoPool used to loop until the pool reached Config.AutoPoolSize
+// inside a single call, so every pool circuit shared (approximately) one
+// creation instant - and therefore one expiry instant Config.
+// CircuitLifetime later. CircuitManager.ExpireStale then reaped them all
+// in the same pass and autoPoolLoop's maintenance ticker rebuilt them all
+// within one 2-second tick, giving the node a permanent, phase-locked
+// burst of AutoPoolSize simultaneous circuit builds once per
+// CircuitLifetime: exactly the "never all at once" correlation
+// fingerprint rotateAutoPool's doc comment and the design spec call out
+// for steady-state rotation, reintroduced for backfill.
+//
+// fillAutoPool now adds at most one circuit per call and leans on the
+// maintenance ticker's own autoPoolFillRetryInterval (2s) cadence to top
+// the rest up over several ticks, so creation times - and hence expiry
+// times - are naturally spread out.
+//
+// The assertion is deliberately a loose lower bound rather than an exact
+// schedule. autoPoolLoop has two independent wakeup sources that can each
+// drive a fill while the pool is below target (the maintenance ticker,
+// and the rotate/fill timer, which nextAutoPoolInterval caps at
+// autoPoolFillRetryInterval while below target), and those two can land in
+// the same instant - so a pool of three fills in at least two distinct
+// ~2s-apart rounds, not necessarily three. One second is therefore
+// comfortably below the ~2s the fixed code produces and enormously above
+// the sub-millisecond span the old fill-in-one-call code produced.
+func TestIntegrationAutoPoolFillStaggersCircuitCreation(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	const poolSize = 3
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = poolSize
+	cfgA.AutoRotationInterval = 5 * time.Minute // rotation must never churn CreatedAt during this test
+	cfgA.CoverTrafficEnabled = false            // isolate fill behavior from cover-traffic noise
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	var entries []garlic.AutoPoolEntry
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		entries = gA.AutoPoolStatus()
+		if len(entries) == poolSize {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size %d; status: %+v", poolSize, entries)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	first, last := entries[0].CreatedAt, entries[0].CreatedAt
+	for _, e := range entries[1:] {
+		if e.CreatedAt.Before(first) {
+			first = e.CreatedAt
+		}
+		if e.CreatedAt.After(last) {
+			last = e.CreatedAt
+		}
+	}
+	const minSpan = time.Second
+	if span := last.Sub(first); span < minSpan {
+		t.Fatalf("pool circuits' CreatedAt span = %s, want at least %s: all %d circuits were built in one burst, so they will also expire in one burst; entries=%+v", span, minSpan, poolSize, entries)
+	}
+}
+
+func TestIntegrationAutoPoolRotatesOneCircuitAtATime(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = 2 // two circuits, both through the only candidate B, so rotation has something to distinguish
+	cfgA.AutoRotationInterval = 1100 * time.Millisecond
+	cfgA.CoverTrafficEnabled = false
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	var before []garlic.AutoPoolEntry
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		before = gA.AutoPoolStatus()
+		if len(before) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size 2; status: %+v", before)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	time.Sleep(1500 * time.Millisecond) // past one rotation tick, comfortably short of a second one
+
+	after := gA.AutoPoolStatus()
+	if len(after) != 2 {
+		t.Fatalf("AutoPoolStatus() after rotation = %d entries, want 2 (pool stays at target size)", len(after))
+	}
+	changed := 0
+	for _, a := range after {
+		stillPresent := false
+		for _, b := range before {
+			if a.ID == b.ID {
+				stillPresent = true
+			}
+		}
+		if !stillPresent {
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("%d circuits changed after ~1 rotation interval, want exactly 1 (before=%+v after=%+v)", changed, before, after)
+	}
+}
+
+// TestIntegrationAutoPoolPrunesExpiredCircuits is the regression test for
+// the auto-pool's most consequential failure mode: g.autoPool is a map
+// the auto-pool loop maintains itself, but circuits leave
+// CircuitManager on their own schedule - Config.CircuitLifetime, reaped
+// by CircuitManager.ExpireStale from cleanupLoop. Before pruning existed,
+// every size decision (fill, rotate-vs-fill, AutoPoolStatus) counted
+// those already-reaped entries as live, so the pool reported itself full
+// while holding nothing but phantom IDs, never backfilled, and cover
+// traffic over it silently failed with ErrCircuitNotFound forever.
+//
+// The reap is simulated with CloseCircuit rather than waited for:
+// CloseCircuit removes the circuit from CircuitManager exactly as
+// ExpireStale's _remove does - leaving g.autoPool's entry behind, which
+// is the whole bug - and cleanupLoop's real ExpireStale only runs on a
+// 30-second ticker, far too coarse to hang a test on. Config.
+// CircuitLifetime is still set short so the circuits really are past
+// their lifetime at that point, matching what ExpireStale would act on.
+//
+// Config.AutoRotationInterval is deliberately much longer than
+// Config.CircuitLifetime here, mirroring the shipped defaults (15m vs
+// 10m): rotation must not be what rescues the pool, so recovery below is
+// genuinely the expiry-driven backfill path.
+func TestIntegrationAutoPoolPrunesExpiredCircuits(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	const poolSize = 2
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = poolSize
+	cfgA.CircuitLifetime = 2 * time.Second
+	cfgA.AutoRotationInterval = 60 * time.Second // never fires during this test
+	cfgA.CoverTrafficEnabled = false
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	livePoolIDs := func() (entries []garlic.AutoPoolEntry, phantom []garlic.CircuitID) {
+		entries = gA.AutoPoolStatus()
+		tracked := map[garlic.CircuitID]bool{}
+		for _, c := range gA.OriginatedCircuits() {
+			tracked[c.ID] = true
+		}
+		for _, e := range entries {
+			if !tracked[e.ID] {
+				phantom = append(phantom, e.ID)
+			}
+		}
+		return entries, phantom
+	}
+
+	var filled []garlic.AutoPoolEntry
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		filled = gA.AutoPoolStatus()
+		if len(filled) == poolSize {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size %d; status: %+v", poolSize, filled)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Past the configured lifetime: every circuit built above is now
+	// expired and is exactly what ExpireStale would remove next.
+	time.Sleep(cfgA.CircuitLifetime + 500*time.Millisecond)
+	for _, e := range filled {
+		gA.CloseCircuit(e.ID)
+	}
+
+	// The direct assertion: the pool must not still be reporting the
+	// circuits that just left CircuitManager.
+	if entries, phantom := livePoolIDs(); len(phantom) != 0 {
+		t.Fatalf("AutoPoolStatus() reports %d circuit(s) no longer tracked by CircuitManager (%x); pool: %+v", len(phantom), phantom, entries)
+	}
+
+	// ...and, having correctly noticed it is below target, it must
+	// actually backfill rather than sitting empty until a rotation tick
+	// that is a full AutoRotationInterval away.
+	deadline = time.Now().Add(25 * time.Second)
+	for {
+		entries, phantom := livePoolIDs()
+		if len(entries) == poolSize && len(phantom) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool did not backfill to %d live circuits after its circuits were reaped; entries=%+v phantom=%x", poolSize, entries, phantom)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestIntegrationCoverTrafficNeverReachesRecvGarlicAuto(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = 1
+	cfgA.CoverTrafficEnabled = true
+	cfgA.CoverTrafficInterval = 300 * time.Millisecond // fast, for test purposes
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for len(gA.AutoPoolStatus()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size 1; status: %+v", gA.AutoPoolStatus())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Cover traffic has had several intervals to fire (real packets, real
+	// circuit, both nodes up) - none of it must ever surface as a real
+	// delivery on B's auto channel.
+	if _, err := gB.RecvGarlicAuto(2 * time.Second); !errors.Is(err, garlic.ErrRecvTimeout) {
+		t.Fatalf("RecvGarlicAuto err = %v, want ErrRecvTimeout (cover packets must never surface as a real delivery)", err)
+	}
+}
+
+// TestIntegrationCoverTrafficActuallyFiresFromAutoPoolLoop is the
+// regression test for autoPoolLoop starving its own cover-traffic timer.
+//
+// The loop used to recreate coverTimer at the top of every iteration and
+// stop it at the bottom. That is only safe while nothing else wakes the
+// loop more often than Config.CoverTrafficInterval - which is exactly why
+// the rotate/fill timer is instead created once and only Reset inside its
+// own case. Adding the backfill maintenance ticker (a hard
+// autoPoolFillRetryInterval = 2s wakeup, unconditional) broke that
+// invariant for coverTimer: at the shipped 75s interval (jittered into
+// roughly [37.5s, 112.5s]) the 2s tick always won the race, tore
+// coverTimer down and rebuilt it from zero, and cover traffic was never
+// sent at any realistic configuration.
+//
+// Directly unit-testing sendCoverTraffic cannot catch this - the bug is
+// in the surrounding select, not in the send - so this test runs the real
+// autoPoolLoop, with the real 2s maintenance ticker at its normal
+// unmodified production cadence, and only shortens the *configured* cover
+// interval.
+//
+// Config.CoverTrafficInterval is 5s rather than a few hundred ms on
+// purpose. coverTrafficDelay floors its result at one second, so any
+// interval below ~2s would produce a round delay shorter than the 2s
+// maintenance tick and the old code would have (accidentally) passed. 5s
+// jitters to [2.5s, 7.5s], which is always strictly longer than the
+// maintenance tick - the same relationship the shipped 75s default has,
+// just faster to test.
+//
+// Cover packets are discarded at the terminal hop and never reach
+// RecvGarlicAuto (see TestIntegrationCoverTrafficNeverReachesRecvGarlicAuto),
+// so the send is observed on the sender instead: Circuit.Seal is the only
+// thing in the package that increments a circuit's packet counter, and
+// building a circuit never calls it, so any increase in
+// Stats.OriginatedPackets here is necessarily a real cover send.
+// Config.AutoRotationInterval is set long so no pool circuit is closed
+// mid-test (GetStats sums over live circuits only).
+func TestIntegrationCoverTrafficActuallyFiresFromAutoPoolLoop(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = 1
+	cfgA.AutoRotationInterval = 5 * time.Minute // no rotation during the test: a closed circuit takes its counters with it
+	cfgA.CoverTrafficEnabled = true
+	cfgA.CoverTrafficInterval = 5 * time.Second
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for len(gA.AutoPoolStatus()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size 1; status: %+v", gA.AutoPoolStatus())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Nothing in this test ever calls SendGarlic/SendGarlicAuto, and the
+	// circuit build itself does not Seal, so this is 0 in practice - read
+	// it rather than assumed, so the assertion below is about the delta.
+	baseline := gA.GetStats().OriginatedPackets
+
+	// Worst case is one full round delay (7.5s) plus one full per-circuit
+	// stagger (5s) after the pool filled, so 60s is a wide margin.
+	deadline = time.Now().Add(60 * time.Second)
+	for {
+		if got := gA.GetStats().OriginatedPackets; got > baseline {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("OriginatedPackets never rose above baseline %d within 60s: autoPoolLoop never actually sent cover traffic over the pool circuit", baseline)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

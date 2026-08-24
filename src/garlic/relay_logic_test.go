@@ -2,6 +2,8 @@ package garlic
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 	"time"
 )
@@ -68,9 +70,13 @@ func buildTestCircuitData(t *testing.T, relayIdentities []*Identity, nodeKeys []
 
 // newTestGarlic returns a *Garlic with just enough state set up to
 // exercise its pure relay-decision logic (processCircuitData,
-// processCapabilityRequest) - no real core.Core involved. The full
-// wiring to a running node is covered separately by the integration
-// tests, which construct a *Garlic via New.
+// processCapabilityRequest, handleCapabilityResponse) - no real core.Core
+// involved. The full wiring to a running node is covered separately by
+// the integration tests, which construct a *Garlic via New.
+//
+// The maps New would normally allocate are allocated here too, so a test
+// can seed them directly (e.g. g.pending, to stand in for a capability
+// request this node had genuinely sent) without tripping over a nil map.
 func newTestGarlic(t *testing.T) *Garlic {
 	t.Helper()
 	id, err := NewIdentity()
@@ -79,12 +85,19 @@ func newTestGarlic(t *testing.T) *Garlic {
 	}
 	cfg := DefaultConfig()
 	return &Garlic{
-		identity:   id,
-		cfg:        cfg,
-		circuits:   NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
-		relayState: newRelayCircuitState(1024),
-		delivered:  make(chan DeliveredMessage, 256),
-		discovery:  newDiscoveryRegistry(1024),
+		identity:        id,
+		cfg:             cfg,
+		circuits:        NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
+		relayState:      newRelayCircuitState(1024),
+		delivered:       make(chan DeliveredMessage, 256),
+		autoDelivered:   make(chan AutoDeliveredMessage, 256),
+		discovery:       newDiscoveryRegistry(1024),
+		capabilityCache: make(map[string]*CapabilityMessage),
+		pending:         make(map[string]chan *CapabilityMessage),
+		originEphemeral: make(map[CircuitID][]byte),
+		pools:           make(map[PoolID]*circuitPool),
+		autoPool:        make(map[CircuitID]time.Time),
+		stop:            make(chan struct{}),
 	}
 }
 
@@ -93,7 +106,7 @@ func TestProcessCircuitDataTerminalHopDelivers(t *testing.T) {
 	payload := []byte("hello bob")
 	msg, circuitID := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, payload, time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDeliver {
 		t.Fatalf("action.kind = %v, want actionDeliver", action.kind)
 	}
@@ -119,7 +132,7 @@ func TestProcessCircuitDataIntermediateHopForwards(t *testing.T) {
 		[][]byte{[]byte("relay-node-key"), destNodeKey},
 		payload, time.Minute)
 
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionForward {
 		t.Fatalf("action.kind = %v, want actionForward", action.kind)
 	}
@@ -136,7 +149,7 @@ func TestProcessCircuitDataIntermediateHopForwards(t *testing.T) {
 	// crash).
 	final := destID
 	finalGarlic := &Garlic{identity: final, relayState: newRelayCircuitState(1024)}
-	finalAction := finalGarlic.processCircuitData(action.forwardMsg[1:]) // strip the msgTypeCircuitData prefix, as handleIncoming would
+	finalAction := finalGarlic.processCircuitData(action.forwardMsg[1:], msgTypeCircuitData) // strip the msgTypeCircuitData prefix, as handleIncoming would
 	if finalAction.kind != actionDeliver {
 		t.Fatalf("final hop action.kind = %v, want actionDeliver", finalAction.kind)
 	}
@@ -158,7 +171,7 @@ func TestProcessCircuitDataForwardAppliesRandomPadding(t *testing.T) {
 			[]*Identity{relay.identity, destID},
 			[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
 			[]byte("payload"), time.Minute)
-		action := relay.processCircuitData(msg)
+		action := relay.processCircuitData(msg, msgTypeCircuitData)
 		if action.kind != actionForward {
 			t.Fatalf("action.kind = %v, want actionForward", action.kind)
 		}
@@ -182,7 +195,7 @@ func TestProcessCircuitDataForwardPaddingWithinConfiguredRange(t *testing.T) {
 		[]*Identity{relay.identity, destID},
 		[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
 		[]byte("payload"), time.Minute)
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionForward {
 		t.Fatalf("action.kind = %v, want actionForward", action.kind)
 	}
@@ -205,7 +218,7 @@ func TestProcessCircuitDataForwardSkipsPaddingWhenDisabled(t *testing.T) {
 		[]*Identity{relay.identity, destID},
 		[][]byte{[]byte("relay-node-key"), []byte("dest-node-key")},
 		[]byte("payload"), time.Minute)
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionForward {
 		t.Fatalf("action.kind = %v, want actionForward", action.kind)
 	}
@@ -295,7 +308,7 @@ func TestProcessCircuitDataDropsMissingNextHopEphemeral(t *testing.T) {
 	}
 
 	msg := buildCircuitDataMissingNextHopEphemeral(t, relay.identity, destID.PublicKey)
-	action := relay.processCircuitData(msg)
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (NextHop set but NextHopEphemeral missing)", action.kind)
 	}
@@ -309,7 +322,7 @@ func TestProcessCircuitDataDropsWrongRecipient(t *testing.T) {
 	}
 	msg, _ := buildTestCircuitData(t, []*Identity{other}, [][]byte{[]byte("someone-else")}, []byte("payload"), time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (message encrypted for a different identity)", action.kind)
 	}
@@ -322,11 +335,11 @@ func TestProcessCircuitDataDropsReplay(t *testing.T) {
 	g := newTestGarlic(t)
 	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, []byte("payload"), time.Minute)
 
-	first := g.processCircuitData(msg)
+	first := g.processCircuitData(msg, msgTypeCircuitData)
 	if first.kind != actionDeliver {
 		t.Fatalf("first action.kind = %v, want actionDeliver", first.kind)
 	}
-	second := g.processCircuitData(msg)
+	second := g.processCircuitData(msg, msgTypeCircuitData)
 	if second.kind != actionDrop {
 		t.Fatalf("second (replayed) action.kind = %v, want actionDrop", second.kind)
 	}
@@ -339,7 +352,7 @@ func TestProcessCircuitDataDropsExpired(t *testing.T) {
 	g := newTestGarlic(t)
 	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, []byte("payload"), -time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (expired)", action.kind)
 	}
@@ -350,7 +363,7 @@ func TestProcessCircuitDataDropsExpired(t *testing.T) {
 
 func TestProcessCircuitDataDropsMalformedTooShort(t *testing.T) {
 	g := newTestGarlic(t)
-	action := g.processCircuitData([]byte{1, 2, 3})
+	action := g.processCircuitData([]byte{1, 2, 3}, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (too short to contain an ephemeral key)", action.kind)
 	}
@@ -362,7 +375,7 @@ func TestProcessCircuitDataDropsMalformedTooShort(t *testing.T) {
 func TestProcessCircuitDataDropsMalformedEnvelope(t *testing.T) {
 	g := newTestGarlic(t)
 	junk := make([]byte, KeySize+10)
-	action := g.processCircuitData(junk)
+	action := g.processCircuitData(junk, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (malformed envelope)", action.kind)
 	}
@@ -376,12 +389,88 @@ func TestProcessCircuitDataDropsWhenRelayTableFull(t *testing.T) {
 	g.relayState = newRelayCircuitState(0) // no room for any circuit
 	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, []byte("payload"), time.Minute)
 
-	action := g.processCircuitData(msg)
+	action := g.processCircuitData(msg, msgTypeCircuitData)
 	if action.kind != actionDrop {
 		t.Fatalf("action.kind = %v, want actionDrop (relay circuit table full)", action.kind)
 	}
 	if got := g.security.snapshot().RelayTableFull; got != 1 {
 		t.Fatalf("security.RelayTableFull = %d, want 1", got)
+	}
+}
+
+func TestProcessCircuitDataV3ForwardPreservesMessageType(t *testing.T) {
+	relay := newTestGarlic(t)
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	destNodeKey := []byte("dest-node-key")
+	payload := []byte("hello bob")
+
+	msg, _ := buildTestCircuitData(t,
+		[]*Identity{relay.identity, destID},
+		[][]byte{[]byte("relay-node-key"), destNodeKey},
+		payload, time.Minute)
+
+	action := relay.processCircuitData(msg, msgTypeCircuitDataV3)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+	if got := action.forwardMsg[0]; got != msgTypeCircuitDataV3 {
+		t.Fatalf("forwardMsg[0] = %d, want msgTypeCircuitDataV3 (%d) - forwarding must preserve the inbound type, never hardcode msgTypeCircuitData", got, msgTypeCircuitDataV3)
+	}
+}
+
+func TestProcessCircuitDataPlainForwardStillUsesPlainType(t *testing.T) {
+	// Regression: the existing msgTypeCircuitData path must be completely
+	// unaffected by this task.
+	relay := newTestGarlic(t)
+	destID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	destNodeKey := []byte("dest-node-key")
+	payload := []byte("hello bob")
+
+	msg, _ := buildTestCircuitData(t,
+		[]*Identity{relay.identity, destID},
+		[][]byte{[]byte("relay-node-key"), destNodeKey},
+		payload, time.Minute)
+
+	action := relay.processCircuitData(msg, msgTypeCircuitData)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+	if got := action.forwardMsg[0]; got != msgTypeCircuitData {
+		t.Fatalf("forwardMsg[0] = %d, want msgTypeCircuitData (%d)", got, msgTypeCircuitData)
+	}
+}
+
+func TestProcessCircuitDataV3DeliverIsTagged(t *testing.T) {
+	g := newTestGarlic(t)
+	payload := []byte("hello bob")
+	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, payload, time.Minute)
+
+	action := g.processCircuitData(msg, msgTypeCircuitDataV3)
+	if action.kind != actionDeliver {
+		t.Fatalf("action.kind = %v, want actionDeliver", action.kind)
+	}
+	if !action.tagged {
+		t.Fatal("action.tagged = false, want true for a msgTypeCircuitDataV3 delivery")
+	}
+}
+
+func TestProcessCircuitDataPlainDeliverIsNotTagged(t *testing.T) {
+	g := newTestGarlic(t)
+	payload := []byte("hello bob")
+	msg, _ := buildTestCircuitData(t, []*Identity{g.identity}, [][]byte{g.identity.PublicKey}, payload, time.Minute)
+
+	action := g.processCircuitData(msg, msgTypeCircuitData)
+	if action.kind != actionDeliver {
+		t.Fatalf("action.kind = %v, want actionDeliver", action.kind)
+	}
+	if action.tagged {
+		t.Fatal("action.tagged = true, want false for a plain msgTypeCircuitData delivery")
 	}
 }
 
@@ -439,5 +528,90 @@ func TestProcessCapabilityRequestAdvertisesGarlicV2(t *testing.T) {
 	}
 	if !bytes.Equal(msg.PublicKey, g.identity.PublicKey) {
 		t.Errorf("response PublicKey = %x, want %x", msg.PublicKey, g.identity.PublicKey)
+	}
+}
+
+// capabilityResponseBody returns a well-formed, fully-capable
+// msgTypeCapabilityResponse body - i.e. the best-case input
+// handleCapabilityResponse can be handed, so a test asserting it is *not*
+// recorded as self-verified is isolating solicitation, nothing else.
+func capabilityResponseBody(t *testing.T, garlicPub []byte) []byte {
+	t.Helper()
+	body, err := (&CapabilityMessage{
+		Versions:  []string{CapabilityGarlicV2, CapabilityAutoCircuit},
+		PublicKey: garlicPub,
+	}).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	return body
+}
+
+func selfVerifiedFor(g *Garlic, nodeKey []byte) (found, selfVerified bool) {
+	for _, p := range g.discovery.list() {
+		if bytes.Equal(p.NodeKey, nodeKey) {
+			return true, p.SelfVerified
+		}
+	}
+	return false, false
+}
+
+func TestHandleCapabilityResponseSolicitedIsSelfVerified(t *testing.T) {
+	g := newTestGarlic(t)
+	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+
+	// Stand in for requestCapability having just sent a request to this
+	// exact key and still waiting on it.
+	g.pending[hex.EncodeToString(peerNode)] = make(chan *CapabilityMessage, 1)
+
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+
+	found, selfVerified := selfVerifiedFor(g, peerNode)
+	if !found {
+		t.Fatal("solicited capability response did not record a discovery entry at all")
+	}
+	if !selfVerified {
+		t.Error("SelfVerified = false for a response to a request this node had outstanding, want true")
+	}
+}
+
+// TestHandleCapabilityResponseUnsolicitedIsNotSelfVerified is the
+// regression test for the branch's headline anti-Sybil property: an
+// attacker who can open an ironwood session to this node can send a
+// msgTypeCapabilityResponse it was never asked for. If that were enough
+// to set SelfVerified, one unsolicited packet would permanently buy
+// first-hop-guard eligibility (discoveryRegistry.record never downgrades
+// SelfVerified), and SelectPathWithGuardPolicy's guarantee would be void.
+func TestHandleCapabilityResponseUnsolicitedIsNotSelfVerified(t *testing.T) {
+	g := newTestGarlic(t)
+	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+
+	// Deliberately no g.pending entry: this node never asked.
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+
+	if _, selfVerified := selfVerifiedFor(g, peerNode); selfVerified {
+		t.Fatal("SelfVerified = true for an unsolicited capability response; one unrequested packet must never grant first-hop-guard eligibility")
+	}
+}
+
+// A response that arrives after this node's own CapabilityTimeout already
+// gave up (requestCapability's deferred delete cleared g.pending) is
+// indistinguishable, from this function's perspective, from a wholly
+// unsolicited one - and must be treated the same way.
+func TestHandleCapabilityResponseAfterTimeoutIsNotSelfVerified(t *testing.T) {
+	g := newTestGarlic(t)
+	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+	key := hex.EncodeToString(peerNode)
+
+	g.pending[key] = make(chan *CapabilityMessage, 1)
+	delete(g.pending, key) // requestCapability's timeout path
+
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+
+	if _, selfVerified := selfVerifiedFor(g, peerNode); selfVerified {
+		t.Fatal("SelfVerified = true for a response that arrived after this node's request had already timed out, want false")
 	}
 }

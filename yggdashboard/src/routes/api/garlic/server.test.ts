@@ -25,11 +25,13 @@ vi.mock('$lib/server/instance', () => ({
             nodeKey: 'a',
             garlicPublicKey: 'b',
             lastSeen: '2026-08-10T00:00:00.000Z',
+            selfVerified: true,
             // Simulates a hypothetical future admin field on
             // getGarlicKnownPeers entries that must not leak either.
             privateKey: 'must-not-leak-from-knownpeers'
           }
-        ]
+        ],
+        autoPool: [{ circuitId: 'c1', createdAt: '2026-08-10T00:00:00.000Z', hops: 3 }]
       }
     }))
   }

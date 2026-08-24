@@ -121,6 +121,11 @@ type DiscoveredPeer struct {
 	NodeKey         []byte
 	GarlicPublicKey []byte
 	LastSeen        time.Time
+	// SelfVerified is true iff this node itself completed a capability
+	// handshake with this peer (handleCapabilityResponse), as opposed to
+	// only ever hearing about it secondhand via gossip (processAnnounce).
+	// Never downgraded by record() once true - see its doc comment.
+	SelfVerified bool
 }
 
 // discoveryRegistry is the bounded set of Garlic peers this node has
@@ -140,14 +145,21 @@ func newDiscoveryRegistry(max int) *discoveryRegistry {
 }
 
 // record adds or refreshes a peer's entry, stamping LastSeen as now.
+// SelfVerified is never downgraded: once a peer has been personally
+// capability-verified, a later secondhand gossip mention of the same key
+// still leaves it marked self-verified.
 func (r *discoveryRegistry) record(p DiscoveredPeer) {
 	key := string(p.NodeKey)
 	p.LastSeen = time.Now()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.peers[key]; !exists && len(r.peers) >= r.max {
+	existing, exists := r.peers[key]
+	if !exists && len(r.peers) >= r.max {
 		r.evictOldestLocked()
+	}
+	if exists && existing.SelfVerified {
+		p.SelfVerified = true
 	}
 	r.peers[key] = p
 }

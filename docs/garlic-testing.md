@@ -124,10 +124,12 @@ python3 -c "print(bytes.fromhex('68656c6c6f20626f622c2066726f6d20616c6963652c207
 ```
 
 Full handler list (`src/garlic/admin.go`): `getGarlicIdentity`,
-`garlicQueryCapability`, `createGarlicCircuit`, `closeGarlicCircuit`,
-`sendGarlic`, `sendGarlicBundled`, `recvGarlic`, `publishGarlicService`,
-`lookupGarlicService`, `getGarlicStats`, `getGarlicKnownPeers`,
-`garlicGossip`, `createGarlicCircuitPool`, `closeGarlicCircuitPool`,
+`garlicQueryCapability`, `createGarlicCircuit`, `createGarlicCircuitAuto`,
+`closeGarlicCircuit`, `sendGarlic`, `sendGarlicBundled`, `recvGarlic`,
+`recvGarlicAuto`, `publishGarlicService`, `lookupGarlicService`,
+`getGarlicStats`, `getGarlicCircuits`, `getGarlicAutoPool`,
+`getGarlicKnownPeers`, `garlicGossip`, `garlicGossipPull`,
+`createGarlicCircuitPool`, `closeGarlicCircuitPool`,
 `sendGarlicMultipath`.
 
 ## 5. Exercise the newer defenses (discovery, diverse selection, multipath, bundling)
@@ -175,6 +177,58 @@ as admin handlers — they're Go APIs (`src/garlic/manager.go`,
 selection, not manual CLI use. `TestIntegrationSelectPathAgainstRealTopology`
 (`src/garlic/integration_test.go`) exercises `SelectPath` against a real
 running mesh if you want to see it in action without writing new code.
+
+## 6. Exercise the auto-pool (auto-built circuits, gossip pull)
+
+Everything above hands the hop keys over by hand. `createGarlicCircuitAuto`
+instead picks them itself, out of what this node has discovered — the
+first hop restricted to peers it has personally capability-verified, the
+rest drawn from the gossiped pool too.
+
+Two config notes before this works on a two-node loopback setup: set
+`Garlic.MinHopCount` to `0` (the default `2` rejects a directly-peered
+node as "too close", which on a two-node test is every candidate you
+have), and `Garlic.PathLength` to `1`. For the background pool and cover
+traffic, also set `Garlic.AutoPoolEnabled` to `true` — optionally with
+`Garlic.BootstrapPeers` listing the other node's key so the pool has a
+candidate at startup instead of waiting for gossip.
+
+```sh
+# nodeA must have verified nodeB itself first - a gossiped-only peer is
+# never eligible for the first hop.
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json garlicQueryCapability key=$NODEB_KEY
+
+# Let nodeA choose the whole path itself. hopCount is optional and
+# defaults to Garlic.PathLength.
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json createGarlicCircuitAuto hopCount=1
+# => {"circuitId": "..."}
+# Fails with "no self-verified candidates" if the query above hasn't
+# succeeded yet, or with an insufficient-candidates error if MinHopCount
+# filters out everything this node knows.
+
+# See the background pool (only populated when AutoPoolEnabled is true):
+./yggdrasilctl -endpoint=tcp://localhost:9001 -json getGarlicAutoPool
+# => {"pool": [{"circuitId": "...", "createdAt": "...", "hops": 1}, ...]}
+
+# Ask a verified peer for its known-peer sample right now, instead of
+# waiting for the next GossipInterval tick:
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json garlicGossipPull key=$NODEA_KEY
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json getGarlicKnownPeers
+# => each peer carries "selfVerified": true/false - the trust tier used
+#    for first-hop selection above.
+
+# Wait for a real payload arriving over an auto-pool circuit terminating
+# here. Cover traffic is discarded before this point, so this stays
+# blocked until something real arrives:
+./yggdrasilctl -endpoint=tcp://localhost:9002 -json recvGarlicAuto timeoutSeconds=5
+```
+
+A circuit from `createGarlicCircuitAuto` is an ordinary circuit ID:
+`sendGarlic`/`closeGarlicCircuit` work on it exactly as in step 4, and a
+payload sent that way is picked up by `recvGarlic`, not `recvGarlicAuto`.
+`recvGarlicAuto` is the receiving end of the tagged auto-pool path
+(`SendGarlicAuto` in the Go API, and the pool's own cover traffic), which
+is deliberately kept separate — see `docs/garlic-protocol.md` §11.2.
 
 ## On a real multi-node network
 

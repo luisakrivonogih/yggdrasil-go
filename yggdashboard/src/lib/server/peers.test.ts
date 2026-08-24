@@ -15,7 +15,7 @@ describe('computePeers', () => {
         { key: 'aaa', up: true, inbound: false, port: 1, priority: 0, cost: 1 },
         { key: 'bbb', up: true, inbound: false, port: 1, priority: 0, cost: 1 }
       ],
-      garlic: { ...EMPTY_SNAPSHOT.garlic, knownPeers: [{ nodeKey: 'aaa', garlicPublicKey: 'gp', lastSeen: '2026-01-01T00:00:00Z' }] }
+      garlic: { ...EMPTY_SNAPSHOT.garlic, knownPeers: [{ nodeKey: 'aaa', garlicPublicKey: 'gp', lastSeen: '2026-01-01T00:00:00Z', selfVerified: true }] }
     };
     const { peers } = computePeers(snap);
     expect(peers.find((p) => p.key === 'aaa')?.garlicCapable).toBe(true);
