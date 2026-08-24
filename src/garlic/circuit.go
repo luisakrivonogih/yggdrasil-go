@@ -9,6 +9,7 @@ package garlic
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"sync"
 	"time"
@@ -81,6 +82,22 @@ func randomCircuitID() (CircuitID, error) {
 	return id, nil
 }
 
+// randomCounterOffset draws a random 64-bit starting value for a hop's
+// per-leg packet counter (see Hop.Counter's doc comment and
+// docs/superpowers/specs/2026-08-24-garlic-hop-local-metadata-design.md).
+// Not a cryptographic requirement - each hop's AEAD key already differs,
+// so (key, counter) uniqueness never depended on cross-hop distinctness -
+// this exists purely so two colluding hops don't observe literally
+// identical counter values by construction, the same way they no longer
+// observe identical LocalCircuitIDs.
+func randomCounterOffset() (uint64, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint64(b[:]), nil
+}
+
 // FirstHop returns the node key of the circuit's first hop.
 func (c *Circuit) FirstHop() []byte {
 	c.mu.Lock()
@@ -131,6 +148,54 @@ func (c *Circuit) Seal(payload []byte) (onion []byte, firstHop []byte, counter u
 	c.packetsSent++
 	c.bytesSent += uint64(len(payload))
 	return onion, c.hops[0].NodeKey, counter, nil
+}
+
+// SealHopLocal is Seal's counterpart for the hop-local envelope format
+// (EnvelopeVersion2): same closed/expired/budget checks and the same
+// per-hop counter-increment loop, but building the onion via
+// BuildOnionHopLocal (each leg's own independent, jittered expiration
+// computed here via jitteredExpiration) and returning the first leg's own
+// CircuitID/counter/expiration - what the caller must write into the very
+// first outer Envelope - instead of Seal's single shared counter value.
+func (c *Circuit) SealHopLocal(payload []byte, packetTTL time.Duration) (onion []byte, firstHop []byte, circuitID CircuitID, counter uint64, expiration uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, nil, CircuitID{}, 0, 0, ErrCircuitClosed
+	}
+	if time.Now().After(c.ExpiresAt) {
+		return nil, nil, CircuitID{}, 0, 0, ErrCircuitExpired
+	}
+	if c.packetsSent+1 > c.MaxPackets {
+		return nil, nil, CircuitID{}, 0, 0, ErrCircuitPacketLimitExceeded
+	}
+	if c.bytesSent+uint64(len(payload)) > c.MaxBytes {
+		return nil, nil, CircuitID{}, 0, 0, ErrCircuitByteLimitExceeded
+	}
+
+	legExpirations := make([]uint64, len(c.hops))
+	for i := range c.hops {
+		exp, jerr := jitteredExpiration(packetTTL)
+		if jerr != nil {
+			return nil, nil, CircuitID{}, 0, 0, jerr
+		}
+		legExpirations[i] = exp
+	}
+
+	onion, err = BuildOnionHopLocal(c.hops, payload, legExpirations)
+	if err != nil {
+		return nil, nil, CircuitID{}, 0, 0, err
+	}
+	circuitID = c.hops[0].LocalCircuitID
+	counter = c.hops[0].Counter
+	expiration = legExpirations[0]
+	for i := range c.hops {
+		c.hops[i].Counter++
+	}
+	c.packetsSent++
+	c.bytesSent += uint64(len(payload))
+	return onion, c.hops[0].NodeKey, circuitID, counter, expiration, nil
 }
 
 // Close marks the circuit unusable for further Seal calls.

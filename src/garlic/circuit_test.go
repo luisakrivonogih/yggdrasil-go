@@ -247,3 +247,59 @@ func TestRandomCircuitIDsAreNotDuplicated(t *testing.T) {
 		ids[id] = true
 	}
 }
+
+func TestSealHopLocalReturnsFirstLegMetadata(t *testing.T) {
+	hops := testHops(2)
+	hops[0].LocalCircuitID = CircuitID{9, 9, 9}
+	hops[0].Counter = 500
+	hops[1].LocalCircuitID = CircuitID{8, 8, 8}
+	hops[1].Counter = 900
+	c, err := NewCircuit(hops, time.Minute, 100, 100000)
+	if err != nil {
+		t.Fatalf("NewCircuit returned error: %v", err)
+	}
+
+	onion, firstHop, circuitID, counter, expiration, err := c.SealHopLocal([]byte("hi"), 60*time.Second)
+	if err != nil {
+		t.Fatalf("SealHopLocal returned error: %v", err)
+	}
+	if circuitID != (CircuitID{9, 9, 9}) {
+		t.Fatalf("circuitID = %x, want hops[0].LocalCircuitID", circuitID)
+	}
+	if counter != 500 {
+		t.Fatalf("counter = %d, want 500 (hops[0]'s pre-increment Counter)", counter)
+	}
+	if expiration == 0 {
+		t.Fatal("expiration = 0, want a real Unix timestamp")
+	}
+	if !bytes.Equal(firstHop, hops[0].NodeKey) {
+		t.Fatalf("firstHop = %x, want %x", firstHop, hops[0].NodeKey)
+	}
+	if len(onion) == 0 {
+		t.Fatal("onion is empty")
+	}
+
+	// A second call must use the now-incremented counters, still
+	// independently per hop (not reset, not resynced across hops).
+	_, _, _, counter2, _, err := c.SealHopLocal([]byte("second"), 60*time.Second)
+	if err != nil {
+		t.Fatalf("SealHopLocal (second call) returned error: %v", err)
+	}
+	if counter2 != 501 {
+		t.Fatalf("counter (second call) = %d, want 501", counter2)
+	}
+}
+
+func TestRandomCounterOffsetVaries(t *testing.T) {
+	a, err := randomCounterOffset()
+	if err != nil {
+		t.Fatalf("randomCounterOffset returned error: %v", err)
+	}
+	b, err := randomCounterOffset()
+	if err != nil {
+		t.Fatalf("randomCounterOffset returned error: %v", err)
+	}
+	if a == b {
+		t.Fatal("randomCounterOffset returned the same value twice in a row - not actually random")
+	}
+}
