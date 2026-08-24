@@ -10,7 +10,6 @@ package garlic
 import (
 	"bytes"
 	"testing"
-	"time"
 )
 
 // hopGarlicFor returns a minimal *Garlic usable to call
@@ -77,14 +76,14 @@ func TestNonAdjacentHopsCannotLinkViaEphemeralKeys(t *testing.T) {
 	if !ok {
 		t.Fatal("circuit not found after CreateCircuit")
 	}
-	onion, _, counter, err := c.Seal([]byte("hello"))
+	onion, _, legID, counter, expiration, err := c.SealHopLocal([]byte("hello"), g.cfg.PacketTTL)
 	if err != nil {
-		t.Fatalf("Seal returned error: %v", err)
+		t.Fatalf("SealHopLocal returned error: %v", err)
 	}
 	e1Pub := g.originEphemeral[circuitID]
-	bodyToHop1, err := buildCircuitDataBody(e1Pub, circuitID, counter, uint64(time.Now().Add(time.Minute).Unix()), onion, g.cfg)
+	bodyToHop1, err := buildCircuitDataBodyHopLocal(e1Pub, legID, counter, expiration, onion, g.cfg)
 	if err != nil {
-		t.Fatalf("buildCircuitDataBody returned error: %v", err)
+		t.Fatalf("buildCircuitDataBodyHopLocal returned error: %v", err)
 	}
 	e1 := append([]byte(nil), bodyToHop1[:KeySize]...)
 
@@ -137,14 +136,14 @@ func TestRelay1CannotDeriveRelay2SessionKey(t *testing.T) {
 		t.Fatalf("CreateCircuit returned error: %v", err)
 	}
 	c, _ := g.circuits.Get(circuitID)
-	onion, _, counter, err := c.Seal([]byte("payload"))
+	onion, _, legID, counter, expiration, err := c.SealHopLocal([]byte("payload"), g.cfg.PacketTTL)
 	if err != nil {
-		t.Fatalf("Seal returned error: %v", err)
+		t.Fatalf("SealHopLocal returned error: %v", err)
 	}
 	e1Pub := g.originEphemeral[circuitID]
-	bodyToHop1, err := buildCircuitDataBody(e1Pub, circuitID, counter, uint64(time.Now().Add(time.Minute).Unix()), onion, g.cfg)
+	bodyToHop1, err := buildCircuitDataBodyHopLocal(e1Pub, legID, counter, expiration, onion, g.cfg)
 	if err != nil {
-		t.Fatalf("buildCircuitDataBody returned error: %v", err)
+		t.Fatalf("buildCircuitDataBodyHopLocal returned error: %v", err)
 	}
 
 	hop1 := hopGarlicFor(hopIDs[0])
@@ -162,7 +161,7 @@ func TestRelay1CannotDeriveRelay2SessionKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ECDH returned error: %v", err)
 	}
-	wrongKey, err := deriveLayerKey(wrongSecret)
+	wrongKey, err := deriveLayerKeyHopLocal(wrongSecret)
 	if err != nil {
 		t.Fatalf("deriveLayerKey returned error: %v", err)
 	}
@@ -171,7 +170,7 @@ func TestRelay1CannotDeriveRelay2SessionKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ECDH returned error: %v", err)
 	}
-	realKey, err := deriveLayerKey(realSecret)
+	realKey, err := deriveLayerKeyHopLocal(realSecret)
 	if err != nil {
 		t.Fatalf("deriveLayerKey returned error: %v", err)
 	}
