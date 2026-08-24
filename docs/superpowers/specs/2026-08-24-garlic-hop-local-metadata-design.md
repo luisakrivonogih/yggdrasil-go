@@ -109,9 +109,21 @@ them (leases, rendezvous) build on top of the existing `Rendezvous`/
   `Envelope`. `Circuit.ID` itself is kept as a Go-level field for local
   bookkeeping only (admin RPCs like `closeGarlicCircuit`/
   `getGarlicCircuits` key off it) — it is never itself placed on the wire
-  past leg 0, and there is no requirement that it equal `hops[0].LocalCircuitID`
-  (keeping them equal is simplest and has no downside, so that's the
-  implementation choice: `Circuit.ID = hops[0].LocalCircuitID`).
+  past leg 0. The implementation reversed this document's original
+  "keeping them equal is simplest" suggestion: `Circuit.ID` (from
+  `NewCircuit`'s own independent `randomCircuitID()` call) and
+  `hops[0].LocalCircuitID` (generated separately in `CreateCircuit`) are
+  deliberately independent values in the shipped code, not required or
+  made to be equal. This is a strictly stronger privacy property than the
+  original suggestion: it means the admin-socket-visible `Circuit.ID`
+  handle a local operator uses to reference "this circuit" is never
+  itself an on-wire value for any leg, including leg 0 — whereas keeping
+  them equal would have made leg 0's wire ID recoverable from local admin
+  state. The consequence — `DeliveredMessage`/`AutoDeliveredMessage`'s
+  `CircuitID` field on the RECEIVING end reflects the terminal leg's own
+  per-hop wire ID, not the originator's `Circuit.ID`, and the two should
+  never be expected to match — is documented on those two struct
+  definitions in `src/garlic/manager.go`.
 
 ### 2. Wire/crypto versioning — no version byte inside the encrypted layer
 

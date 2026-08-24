@@ -47,7 +47,7 @@ size an observer could use as a fingerprint.
 
 ```
 offset  size  field
-0       1     version            (currently always 1)
+0       1     version            (1 = legacy global-ID format; 2 = hop-local format - see "Hop-local envelope format" below. This node always originates version 2 once every hop supports it.)
 1       16    circuit_id         (CircuitID, 128-bit random value)
 17      8     packet_counter     (uint64)
 25      8     expiration         (uint64, Unix seconds)
@@ -146,6 +146,13 @@ reserved in the same derivation chain for a future reply/return path —
 no circuit today carries traffic in that direction, so it is currently
 unused.
 
+This derivation chain (`LabelCircuitEstablish`/`LabelCircuitDataSend`) is
+used for `EnvelopeVersion1` circuits. `EnvelopeVersion2` (hop-local)
+circuits use a distinct chain, `LabelCircuitEstablishHopLocal`/
+`LabelCircuitDataSendHopLocal` - see "Hop-local envelope format" below
+for why the two are kept cryptographically separate rather than merely
+version-tagged.
+
 ### 4.2 Layer plaintext
 
 `src/garlic/layer.go`. What `key_i` decrypts `Envelope.Body` into:
@@ -186,8 +193,12 @@ split from the I/O wrapper):
    treated identically: drop, no error surfaced.
 6. If the recovered `NextHop` is empty: deliver `Inner` locally
    (`Garlic.RecvGarlic`).
-7. Otherwise: rebuild an `Envelope` with the same `CircuitID`,
-   `PacketCounter`, and `Expiration`, `Body = Inner`. If
+7. Otherwise (this step describes `EnvelopeVersion1` handling
+   specifically; `EnvelopeVersion2` circuits instead forward using the
+   decrypted layer's own `NextLocalCircuitID`/`NextLocalCounter`/
+   `NextLocalExpiration`, never copying the incoming envelope's values —
+   see "Hop-local envelope format" below): rebuild an `Envelope` with the
+   same `CircuitID`, `PacketCounter`, and `Expiration`, `Body = Inner`. If
    `Config.PaddingEnabled`, this hop independently re-rolls
    `Envelope.PadToRandomRange(MinPaddedSize, MaxPaddedSize)` before
    marshaling — the outgoing wire size on this hop's outbound link is

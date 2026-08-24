@@ -127,12 +127,12 @@ through a `garlic-v3`-less hop. A mixed mesh of `garlic-v2`-only and
 still correctly relays an `EnvelopeVersion1` circuit that some other,
 not-yet-upgraded peer originated through it — the relay path branches on
 the incoming `Envelope.Version`, not on this node's own capabilities
-(`docs/garlic-protocol.md` §4.3). But this node itself never originates
-an `EnvelopeVersion1` circuit once it runs code that understands
-`garlic-v3` — `CreateCircuit` has no fallback branch to the legacy
-format at all, so a `garlic-v2`-only peer simply cannot be selected as a
-hop, rather than the circuit silently falling back to the
-less-private format.
+(`docs/garlic-protocol.md`, "Hop-local envelope format" section). But
+this node itself never originates an `EnvelopeVersion1` circuit once it
+runs code that understands `garlic-v3` — `CreateCircuit` has no fallback
+branch to the legacy format at all, so a `garlic-v2`-only peer simply
+cannot be selected as a hop, rather than the circuit silently falling
+back to the less-private format.
 
 ## The nuance the original request's diagrams don't quite capture
 

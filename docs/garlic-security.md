@@ -81,16 +81,25 @@ that happens to parse.
   **Update:** the hop-local envelope format (`EnvelopeVersion2`/
   `garlic-v3`, 2026-08-24 — see the new paragraph in "Cryptographic
   primitives" above and `docs/garlic-protocol.md`'s "Hop-local envelope
-  format" section) closes this residual for every circuit this node
-  originates: `CircuitID`/`PacketCounter`/`Expiration` are now
-  independent per hop-to-hop leg rather than copied verbatim, so two
-  non-adjacent colluding relays observe different values for all three
-  fields on the same logical packet. This node itself never originates
-  a legacy `EnvelopeVersion1` circuit once it understands `garlic-v3`;
-  it still correctly relays one on behalf of a not-yet-upgraded peer,
-  and that specific circuit keeps exhibiting the old verbatim-copy
-  behavior, since this node doesn't control the format a peer it
-  relays for chose at origination.
+  format" section) closes the *bit-identical-by-construction* form of
+  this residual for every circuit this node originates:
+  `CircuitID`/`PacketCounter`/`Expiration` are now independent per
+  hop-to-hop leg rather than copied verbatim, so two non-adjacent
+  colluding relays no longer observe identical values for all three
+  fields on the same logical packet by construction. It does not close
+  every form of cross-leg correlation via these fields, though: each
+  leg's `PacketCounter` starts at an independent random offset but
+  still increments by exactly 1 per packet, so the *delta* between two
+  legs' counters stays constant for the circuit's life and becomes a
+  free, repeatable correlator once a pair of colluding relays anchors
+  it with even one independently-obtained packet pairing — see
+  `docs/garlic-threat-model.md`'s "Hop-local envelope metadata: what it
+  does and does not close" section for that residual in full. This node
+  itself never originates a legacy `EnvelopeVersion1` circuit once it
+  understands `garlic-v3`; it still correctly relays one on behalf of a
+  not-yet-upgraded peer, and that specific circuit keeps exhibiting the
+  old verbatim-copy behavior, since this node doesn't control the
+  format a peer it relays for chose at origination.
 
 ## IP / address leakage
 

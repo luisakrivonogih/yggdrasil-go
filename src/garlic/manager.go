@@ -181,7 +181,14 @@ var (
 )
 
 // DeliveredMessage is an application payload that arrived because this
-// node was the final hop of someone else's circuit.
+// node was the final hop of someone else's circuit. CircuitID is the
+// value this node saw on the incoming leg of the wire - for an
+// EnvelopeVersion2 (hop-local) circuit, that is the terminal leg's own
+// independently-random LocalCircuitID, unrelated to the originator's own
+// Circuit.ID (which is never itself placed on the wire under the
+// hop-local format - see docs/garlic-protocol.md's "Hop-local envelope
+// format" section). Do not expect this to match the value CreateCircuit
+// returned to the originator.
 type DeliveredMessage struct {
 	CircuitID CircuitID
 	Payload   []byte
@@ -192,7 +199,10 @@ type DeliveredMessage struct {
 // AutoCreateCircuit). Kept entirely separate from DeliveredMessage/
 // g.delivered - a cover-traffic packet is silently discarded before it
 // ever reaches this type, and nothing sent via SendGarlicAuto ever
-// reaches the plain g.delivered/RecvGarlic path either.
+// reaches the plain g.delivered/RecvGarlic path either. As with
+// DeliveredMessage, CircuitID is the terminal leg's own per-hop wire
+// value for a hop-local circuit, not the originator's Circuit.ID - the
+// two should never be expected to match.
 type AutoDeliveredMessage struct {
 	CircuitID CircuitID
 	Payload   []byte
@@ -475,7 +485,9 @@ func (g *Garlic) SelectPath(n int) ([]HopCandidate, error) {
 // it's used, same as the manual createGarlicCircuit admin RPC already
 // does - note QueryCapability reuses a cached answer when it has one, so
 // this is not necessarily a fresh round trip per hop), and every hop must
-// additionally advertise
+// additionally advertise CapabilityGarlicV3 (this node only ever
+// originates hop-local circuits - see CreateCircuit's own gate, which
+// this check catches at selection time instead of one layer deeper) and
 // CapabilityAutoCircuit - see
 // docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
 // §6/§8 for why every position, not just the terminal one, is gated.
@@ -491,6 +503,9 @@ func (g *Garlic) AutoCreateCircuit(n int) (CircuitID, error) {
 		capability, err := g.QueryCapability(h.NodeKey)
 		if err != nil {
 			return CircuitID{}, fmt.Errorf("hop %d: %w", i, err)
+		}
+		if !capability.SupportsGarlicV3() {
+			return CircuitID{}, fmt.Errorf("hop %d: %w", i, ErrHopMissingGarlicV3Support)
 		}
 		if !capability.SupportsAutoCircuit() {
 			return CircuitID{}, fmt.Errorf("hop %d: %w", i, ErrHopMissingAutoCircuitSupport)

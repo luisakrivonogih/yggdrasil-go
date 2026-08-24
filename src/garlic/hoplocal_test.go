@@ -203,3 +203,106 @@ func TestEnvelopeV1CircuitsStillRelayCorrectly(t *testing.T) {
 		t.Fatalf("delivered payload = %q, want %q", action.payload, "legacy payload")
 	}
 }
+
+// TestHopLocalKeyedOnionFailsUnderLegacyEnvelopeVersion and
+// TestLegacyKeyedOnionFailsUnderHopLocalEnvelopeVersion prove the deeper
+// claim docs/garlic-protocol.md and docs/garlic-security.md make about
+// the two envelope versions' key-derivation chains being cryptographically
+// distinct: a well-formed envelope whose declared Version doesn't match
+// the derivation chain actually used to encrypt its Body fails to decrypt
+// at AEAD authentication - not merely at the Envelope.Version byte check
+// (already covered by TestUnmarshalRejectsUnknownVersion in
+// envelope_test.go, which only proves an *unrecognized* version is
+// rejected, not that a *recognized-but-mismatched* version/key-chain pair
+// fails). Cross-wiring like this is exactly what a security-critical
+// protocol change needs a direct regression test for.
+
+func TestHopLocalKeyedOnionFailsUnderLegacyEnvelopeVersion(t *testing.T) {
+	relayID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair returned error: %v", err)
+	}
+	secret, err := ECDH(ephemeralPriv, relayID.PublicKey)
+	if err != nil {
+		t.Fatalf("ECDH returned error: %v", err)
+	}
+	key, err := deriveLayerKeyHopLocal(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKeyHopLocal returned error: %v", err)
+	}
+	ciphertext, err := EncryptLayerHopLocal(key, 0, &LayerPlaintext{Inner: []byte("payload")})
+	if err != nil {
+		t.Fatalf("EncryptLayerHopLocal returned error: %v", err)
+	}
+	env := &Envelope{
+		Version:       EnvelopeVersion1,
+		CircuitID:     CircuitID{1},
+		PacketCounter: 0,
+		Expiration:    uint64(time.Now().Add(time.Minute).Unix()),
+		Body:          ciphertext,
+	}
+	envBytes, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	body := append(append([]byte(nil), ephemeralPub...), envBytes...)
+
+	relay := hopGarlicFor(relayID)
+	before := relay.security.authFailures.Load()
+	action := relay.processCircuitData(body, msgTypeCircuitData)
+	if action.kind != actionDrop {
+		t.Fatalf("action.kind = %v, want actionDrop (a hop-local-keyed layer wrapped in an EnvelopeVersion1 envelope must fail AEAD auth under the legacy key chain, not succeed or misparse)", action.kind)
+	}
+	if got := relay.security.authFailures.Load(); got != before+1 {
+		t.Fatalf("authFailures = %d, want %d (must be counted as an auth failure, not a malformed-packet or other category)", got, before+1)
+	}
+}
+
+func TestLegacyKeyedOnionFailsUnderHopLocalEnvelopeVersion(t *testing.T) {
+	relayID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity returned error: %v", err)
+	}
+	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair returned error: %v", err)
+	}
+	secret, err := ECDH(ephemeralPriv, relayID.PublicKey)
+	if err != nil {
+		t.Fatalf("ECDH returned error: %v", err)
+	}
+	key, err := deriveLayerKey(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKey returned error: %v", err)
+	}
+	ciphertext, err := EncryptLayer(key, 0, &LayerPlaintext{Inner: []byte("payload")})
+	if err != nil {
+		t.Fatalf("EncryptLayer returned error: %v", err)
+	}
+	env := &Envelope{
+		Version:       EnvelopeVersion2,
+		CircuitID:     CircuitID{1},
+		PacketCounter: 0,
+		Expiration:    uint64(time.Now().Add(time.Minute).Unix()),
+		Body:          ciphertext,
+	}
+	envBytes, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	body := append(append([]byte(nil), ephemeralPub...), envBytes...)
+
+	relay := hopGarlicFor(relayID)
+	before := relay.security.authFailures.Load()
+	action := relay.processCircuitData(body, msgTypeCircuitData)
+	if action.kind != actionDrop {
+		t.Fatalf("action.kind = %v, want actionDrop (a legacy-keyed layer wrapped in an EnvelopeVersion2 envelope must fail AEAD auth under the hop-local key chain, not succeed or misparse)", action.kind)
+	}
+	if got := relay.security.authFailures.Load(); got != before+1 {
+		t.Fatalf("authFailures = %d, want %d (must be counted as an auth failure, not a malformed-packet or other category)", got, before+1)
+	}
+}

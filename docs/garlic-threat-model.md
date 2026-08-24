@@ -563,3 +563,20 @@ no explicit teardown message in the protocol at all.
 purely via `relaystate.go`'s local `expireStale` timeout, independent of
 any other hop. A relay never learns anything about a circuit's teardown
 beyond its own two immediate neighbors aging out.
+
+A further, more specific residual: each hop's packet counter starts at
+an independent random offset (`randomCounterOffset`,
+`src/garlic/circuit.go`) but increments by exactly 1 per packet, so the
+*difference* between any two legs' counters is constant for the life of
+the circuit. A pair of colluding non-adjacent relays who anchor even one
+confident packet pairing (e.g. via the timing correlation already
+discussed above) can recover that constant delta and thereafter label
+every subsequent packet pair on the same circuit for free, without
+needing to repeat whatever technique produced the original anchor. This
+is deliberate, documented scope from the original design (per-leg
+values are independently random, not required to defeat a
+bootstrapped-correlation attack specifically) - not a regression from
+before this pass (which had a delta of exactly 0, needing no anchoring
+observation at all to correlate every packet), but worth naming
+precisely rather than leaving a reader to assume this specific technique
+is fully closed.
