@@ -526,7 +526,7 @@ caller; nothing in this version enforces one.
 | Adversary | Real capability retained |
 |---|---|
 | Passive observer | Sees traffic exists, sizes, timing; not payload. Cannot see the Garlic tag itself (inside the encrypted session) |
-| Single malicious relay (chosen Garlic hop) | Sees its own hop's real-key neighbors (unavoidable, via ironwood's own unencrypted `source`/`dest` fields, not something Garlic hides); cannot decrypt other layers; per-hop ephemeral keys now mean non-adjacent colluding hops share no ephemeral key to compare - but `CircuitID`/`PacketCounter`/`Expiration` are still copied verbatim, unencrypted, hop-to-hop, and remain a linkability signal for colluding non-adjacent hops |
+| Single malicious relay (chosen Garlic hop) | Sees its own hop's real-key neighbors (unavoidable, via ironwood's own unencrypted `source`/`dest` fields, not something Garlic hides); cannot decrypt other layers; per-hop ephemeral keys mean non-adjacent colluding hops share no ephemeral key to compare (2026-08-09 pass); for circuits built with the hop-local envelope format (`EnvelopeVersion2`/`garlic-v3`, 2026-08-24 pass), `CircuitID`/`PacketCounter`/`Expiration` are also independent per leg - two non-adjacent colluding hops observe different values for all three fields on the same logical packet, and cannot recover a non-adjacent leg's values without the adjacent hop's key. A legacy `EnvelopeVersion1` circuit (relayed on behalf of a not-yet-upgraded peer) still exhibits the old verbatim-copy behavior for that circuit specifically - this node itself never originates one. |
 | Malicious relay / availability attacker | Any hop can drop, delay, or reorder a circuit's traffic at will, or stop forwarding for it entirely - indistinguishable from an ordinary network failure, since Garlic has no independent liveness/acknowledgment channel |
 | Mesh-path intermediate node (not a chosen hop) | Same real-key-pair visibility as a malicious relay, for any hop-pair its position sits between - without ever being selected as a circuit hop |
 | Malicious introduction point | Sees GID lookups; payload only if also the terminal hop |
@@ -540,3 +540,26 @@ caller; nothing in this version enforces one.
 | Route manipulation | N/A - no path-selection input an intermediate/remote party can inject either way; automatic selection (`SelectPath`, or now `AutoCreateCircuit`/`createGarlicCircuitAuto`) is available and materially easier to reach than before, but the manual `createGarlicCircuit` path is unchanged and neither is mandatory |
 | Sybil | Partially mitigated - `SelectDiversePath` (tree-position diversity), multipath pools, and a self-verified/gossiped trust split with a first-hop guard policy (`SelectPathWithGuardPolicy`) raise the cost of the simplest strategies; no IP/ASN diversity, reputation, or resource-cost mechanism exists, and self-verification itself costs an adversary nothing beyond answering a handshake |
 | Intersection attacks | Narrowed, not defeated - every node is structurally both a possible originator and a relay for others, so participation alone doesn't distinguish "this is my traffic" from "I'm relaying"; still erodable via traffic-correlation across sessions |
+
+## Hop-local envelope metadata: what it does and does not close
+
+Closing the `CircuitID`/`PacketCounter`/`Expiration` verbatim-copy signal
+(above) removes one specific, cheap correlation technique available to two
+colluding non-adjacent Garlic relays. It does **not** change what a global
+passive adversary observing the underlying Yggdrasil/ironwood mesh can see:
+`ironwood/network`'s `traffic` structure still exposes source/destination
+node keys, volume, and timing at every hop, regardless of Garlic envelope
+version - see "Global passive adversary" above. Hop-local envelope
+metadata raises the cost of one specific *metadata-comparison* attack; it
+is not a mixnet and does not defend against traffic confirmation via
+timing/volume correlation, which remains covered by padding, jitter, and
+cover traffic (with their own, separately-documented limits) rather than
+by this mechanism.
+
+Teardown was already hop-local before this pass, by construction: there is
+no explicit teardown message in the protocol at all.
+`Garlic.CloseCircuit` only clears the *originator's* local bookkeeping
+(`Circuit`/`originEphemeral` map entries); every relay forgets a circuit
+purely via `relaystate.go`'s local `expireStale` timeout, independent of
+any other hop. A relay never learns anything about a circuit's teardown
+beyond its own two immediate neighbors aging out.

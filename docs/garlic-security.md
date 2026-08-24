@@ -24,6 +24,21 @@ encryption anywhere in this package — every ciphertext produced by
 `Seal`/`EncryptLayer` carries a Poly1305 tag, and every `Open`/
 `DecryptLayer` call verifies it before returning plaintext.
 
+The hop-local envelope format (`EnvelopeVersion2`/`garlic-v3`,
+`Circuit.SealHopLocal`) reuses this exact two-stage
+establish-then-data HKDF chaining pattern — the same shape already used
+to separate `garlic-v1` from `garlic-v2` in the 2026-08-09
+crypto-hardening pass — under a new label pair,
+`LabelCircuitEstablishHopLocal`/`LabelCircuitDataSendHopLocal`
+(`deriveLayerKeyHopLocal`, `src/garlic/crypto.go`), independent of the
+legacy `LabelCircuitEstablish`/`LabelCircuitDataSend` chain above. This
+is why a version/label mismatch — decrypting a hop-local layer with the
+legacy chain's key, or vice versa — is a hard cryptographic failure
+(`ErrDecryptionFailed`, from Poly1305 tag verification) rather than a
+parsing ambiguity: the two chains never derive the same key material
+from the same raw ECDH secret, so there is no wrong-format plaintext
+that happens to parse.
+
 ## Identity correlation
 
 - **Long-term Garlic identity is independent of the Yggdrasil node
@@ -60,8 +75,22 @@ encryption anywhere in this package — every ciphertext produced by
   the AEAD-encrypted layer and are copied verbatim hop-to-hop, so
   colluding non-adjacent relays can still confirm they're on the same
   circuit by comparing those three fields even though they now share no
-  ephemeral key. That residual is unaddressed by this pass and is a
+  ephemeral key. That residual was unaddressed by this pass and was a
   concrete item for a future one.
+
+  **Update:** the hop-local envelope format (`EnvelopeVersion2`/
+  `garlic-v3`, 2026-08-24 — see the new paragraph in "Cryptographic
+  primitives" above and `docs/garlic-protocol.md`'s "Hop-local envelope
+  format" section) closes this residual for every circuit this node
+  originates: `CircuitID`/`PacketCounter`/`Expiration` are now
+  independent per hop-to-hop leg rather than copied verbatim, so two
+  non-adjacent colluding relays observe different values for all three
+  fields on the same logical packet. This node itself never originates
+  a legacy `EnvelopeVersion1` circuit once it understands `garlic-v3`;
+  it still correctly relays one on behalf of a not-yet-upgraded peer,
+  and that specific circuit keeps exhibiting the old verbatim-copy
+  behavior, since this node doesn't control the format a peer it
+  relays for chose at origination.
 
 ## IP / address leakage
 
@@ -293,27 +322,30 @@ descriptors (the crypto-hardening pass — see
 are now also implemented, closing out what was items 1 and (new) 4 from
 an earlier version of this list — see "Identity correlation" and
 "Forward secrecy" above for what they closed and their residual scope,
-and the new "Service descriptor authentication" note below. Remaining
-priority order:
+and the new "Service descriptor authentication" note below. Per-hop
+rewriting of `CircuitID`/`PacketCounter`/`Expiration` — the residual
+linkability signal item 1 used to flag in an earlier version of this
+list — is now also implemented, via the hop-local envelope format
+(`EnvelopeVersion2`/`garlic-v3`, the 2026-08-24 pass — see the new
+paragraph above and `docs/garlic-protocol.md`'s "Hop-local envelope
+format" section) for every circuit this node originates; a circuit
+relayed on behalf of a not-yet-upgraded peer still uses the legacy,
+verbatim-copy `EnvelopeVersion1` format for that circuit specifically,
+since this node never controls what format a peer it relays for
+originated with. Remaining priority order:
 
-1. Per-hop rewriting of `CircuitID`/`PacketCounter`/`Expiration` (the
-   residual linkability signal flagged in "Identity correlation" above
-   — these three `Envelope` fields still travel unencrypted and
-   unchanged hop-to-hop, so colluding non-adjacent relays can still
-   confirm they're on the same circuit even with no shared ephemeral
-   key).
-2. IP/ASN-diversity-aware Sybil resistance — `SelectDiversePath`'s only
+1. IP/ASN-diversity-aware Sybil resistance — `SelectDiversePath`'s only
    signal today is spanning-tree position, which a topologically
    diverse adversary defeats; a real improvement needs a diversity
    signal that doesn't itself leak relay operators' real IPs through
    gossip (see `docs/garlic-threat-model.md`'s Sybil section for why
    that tradeoff isn't free).
-3. A deliberate circuit-rotation policy (when to build a new circuit,
+2. A deliberate circuit-rotation policy (when to build a new circuit,
    how much to relay for others as camouflage) to further narrow
    intersection attacks — today only `Config.CircuitLifetime`'s upper
    bound exists; there is no policy actively deciding *when* within
    that bound to rotate.
-4. A distributed `Rendezvous` implementation, with its own threat-model
+3. A distributed `Rendezvous` implementation, with its own threat-model
    pass first (`docs/garlic-rendezvous.md`). Descriptor *authentication*
    (GID self-certification, Ed25519 signature, expiry) is now solved
    independent of how descriptors get distributed — a distributed

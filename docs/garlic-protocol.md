@@ -201,6 +201,37 @@ split from the I/O wrapper):
    absent `next_hop_ephemeral` is malformed and dropped rather than
    forwarded.
 
+## Hop-local envelope format (EnvelopeVersion2 / garlic-v3)
+
+`Envelope.Version = 2` marks a hop-local circuit: `CircuitID`,
+`PacketCounter`, and `Expiration` are scoped to one hop-to-hop leg, not
+the whole circuit. A relay decrypting its own onion layer under this
+format finds three additional fields (see `LayerPlaintext` below) telling
+it what to write for the *next* leg when it forwards - it never reuses
+its own incoming leg's values.
+
+`LayerPlaintext` (hop-local shape, `marshalHopLocal`/
+`unmarshalLayerPlaintextHopLocal`, `src/garlic/layer.go`): the existing
+`next_hop_len(4) next_hop(N) has_ephemeral(1) [ephemeral(32)]
+inner_len(4) inner(M)` prefix, followed by `has_next_local(1)
+[next_local_circuit_id(16) next_local_counter(8)
+next_local_expiration(8)]` - present for every non-terminal hop, absent
+for the circuit's final hop.
+
+Key derivation uses a distinct HKDF label chain
+(`LabelCircuitEstablishHopLocal`/`LabelCircuitDataSendHopLocal`,
+`src/garlic/crypto.go`) from the legacy `garlic-v2` chain, so a version
+mismatch fails at AEAD authentication even if the `Envelope.Version` byte
+check were somehow bypassed.
+
+A node advertises support via the `garlic-v3` capability string
+(`CapabilityGarlicV3`, `src/garlic/capability.go`) - unrelated to
+`msgTypeCircuitDataV3`, the pre-existing auto-pool cover-traffic wire tag.
+`Garlic.CreateCircuit` refuses to build a circuit through any hop that
+hasn't advertised `garlic-v3`; every circuit this node originates uses
+this format once available, never falling back to `EnvelopeVersion1`
+intentionally.
+
 ## 5. Replay protection
 
 Two independent replay windows exist, both a fixed 2048-bit sliding

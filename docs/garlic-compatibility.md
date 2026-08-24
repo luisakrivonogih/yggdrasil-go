@@ -113,6 +113,27 @@ capability responses but not relayed announcements (and doesn't
 currently feed any live circuit-construction path regardless), and the
 admin-socket paths perform no version check at all.
 
+A further split exists one layer deeper than the `garlic-v1`/`garlic-v2`
+boundary above: the hop-local envelope format (`EnvelopeVersion2`,
+capability `garlic-v3` — see `docs/garlic-protocol.md`'s "Hop-local
+envelope format" section). Unlike the `garlic-v1`/`garlic-v2` split,
+this one *is* enforced up front, uniformly, and unconditionally:
+`Garlic.CreateCircuit` (`src/garlic/manager.go`) checks every candidate
+hop's `CapabilityMessage.SupportsGarlicV3` before building anything,
+refusing with `ErrHopMissingGarlicV3Support` if any hop lacks it — there
+is no code path, admin-socket or automatic, that builds a new circuit
+through a `garlic-v3`-less hop. A mixed mesh of `garlic-v2`-only and
+`garlic-v3`-capable nodes is fully supported in one direction: this node
+still correctly relays an `EnvelopeVersion1` circuit that some other,
+not-yet-upgraded peer originated through it — the relay path branches on
+the incoming `Envelope.Version`, not on this node's own capabilities
+(`docs/garlic-protocol.md` §4.3). But this node itself never originates
+an `EnvelopeVersion1` circuit once it runs code that understands
+`garlic-v3` — `CreateCircuit` has no fallback branch to the legacy
+format at all, so a `garlic-v2`-only peer simply cannot be selected as a
+hop, rather than the circuit silently falling back to the
+less-private format.
+
 ## The nuance the original request's diagrams don't quite capture
 
 > Alice(Garlic) → New Ygg → Old Ygg → Old Ygg → New Ygg → Bob
