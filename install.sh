@@ -247,7 +247,8 @@ if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_
        --arg bootstrap "$GARLIC_BOOTSTRAP_PEERS" \
        '.Garlic.Enabled = (if $garlic then true else .Garlic.Enabled end)
         | .Dashboard.Enabled = (if $dash then true else .Dashboard.Enabled end)
-        | .Garlic.BootstrapPeers = (if $bootstrap != "" then ($bootstrap | split(",")) else .Garlic.BootstrapPeers end)' \
+        | .Garlic.BootstrapPeers = (if $bootstrap != "" then ($bootstrap | split(",")) else .Garlic.BootstrapPeers end)
+        | .Garlic.AutoPoolEnabled = (if $bootstrap != "" then true else .Garlic.AutoPoolEnabled end)' \
        "$TMP_JSON" > "$TMP_JSON.new" && EDITED=1
   elif command -v python3 >/dev/null 2>&1; then
     ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$ENABLE_DASHBOARD" GARLIC_BOOTSTRAP_PEERS="$GARLIC_BOOTSTRAP_PEERS" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
@@ -261,6 +262,11 @@ if os.environ.get("ENABLE_DASHBOARD") == "1":
 GARLIC_BOOTSTRAP_PEERS = os.environ.get("GARLIC_BOOTSTRAP_PEERS", "")
 if GARLIC_BOOTSTRAP_PEERS:
     cfg.setdefault("Garlic", {})["BootstrapPeers"] = GARLIC_BOOTSTRAP_PEERS.split(",")
+    # Setting bootstrap peers is the operator's explicit signal that they
+    # want the auto-pool actually running, not just seeded - AutoPoolEnabled
+    # defaults to false (a node can relay/terminate for others' auto-pool
+    # circuits without originating its own), so it needs an explicit push.
+    cfg.setdefault("Garlic", {})["AutoPoolEnabled"] = True
 json.dump(cfg, sys.stdout, indent=2)
 PY
   fi
@@ -273,7 +279,7 @@ PY
     systemctl restart yggdrasil
     log "Config updated, yggdrasil restarted"
   else
-    log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and, if bootstrapping, \"Garlic\": { \"BootstrapPeers\": [...] }) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
+    log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and, if bootstrapping, \"Garlic\": { \"BootstrapPeers\": [...], \"AutoPoolEnabled\": true }) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
   fi
 fi
 
