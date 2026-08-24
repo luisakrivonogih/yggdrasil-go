@@ -394,3 +394,36 @@ func TestCreateCircuitSetsLocalCircuitIDsAndRejectsV2OnlyHop(t *testing.T) {
 		t.Fatalf("CreateCircuit error = %v, want ErrHopMissingGarlicV3Support", err)
 	}
 }
+
+func TestBuildCircuitDataMessageHopLocalUsesEnvelopeVersion2(t *testing.T) {
+	g, hopIDs := buildThreeHopOriginator(t)
+	path, nodeKeys := buildTestPath(hopIDs)
+	circuitID, err := g.CreateCircuit(path, nodeKeys)
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+	c, _ := g.circuits.Get(circuitID)
+
+	onion, _, legID, counter, expiration, err := c.SealHopLocal([]byte("hello"), g.cfg.PacketTTL)
+	if err != nil {
+		t.Fatalf("SealHopLocal returned error: %v", err)
+	}
+	ephemeralPub := g.originEphemeral[circuitID]
+	msg, err := buildCircuitDataMessageHopLocal(ephemeralPub, legID, counter, expiration, onion, g.cfg)
+	if err != nil {
+		t.Fatalf("buildCircuitDataMessageHopLocal returned error: %v", err)
+	}
+	if msg[0] != msgTypeCircuitData {
+		t.Fatalf("message type = %d, want msgTypeCircuitData", msg[0])
+	}
+	env, err := Unmarshal(msg[1+KeySize:])
+	if err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	if env.Version != EnvelopeVersion2 {
+		t.Fatalf("Envelope.Version = %d, want EnvelopeVersion2", env.Version)
+	}
+	if env.CircuitID != legID {
+		t.Fatalf("Envelope.CircuitID = %x, want %x", env.CircuitID, legID)
+	}
+}

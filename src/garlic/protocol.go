@@ -169,6 +169,41 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
 }
 
+// buildCircuitDataMessageHopLocal is buildCircuitDataMessage's
+// counterpart for the hop-local envelope format: same shape
+// (msgTypeCircuitData || ephemeralPub || Envelope), EnvelopeVersion2
+// instead of EnvelopeVersion1.
+func buildCircuitDataMessageHopLocal(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
+	body, err := buildCircuitDataBodyHopLocal(ephemeralPub, id, counter, expiration, onion, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{msgTypeCircuitData}, body...), nil
+}
+
+// buildCircuitDataBodyHopLocal is buildCircuitDataBody's counterpart for
+// the hop-local envelope format.
+func buildCircuitDataBodyHopLocal(ephemeralPub []byte, id CircuitID, counter, expiration uint64, onion []byte, cfg Config) ([]byte, error) {
+	env := &Envelope{
+		Version:       EnvelopeVersion2,
+		CircuitID:     id,
+		PacketCounter: counter,
+		Expiration:    expiration,
+		Body:          onion,
+	}
+	if cfg.PaddingEnabled {
+		_ = env.PadToRandomRange(cfg.MinPaddedSize, cfg.MaxPaddedSize)
+	}
+	envBytes, err := env.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	body := make([]byte, 0, len(ephemeralPub)+len(envBytes))
+	body = append(body, ephemeralPub...)
+	body = append(body, envBytes...)
+	return body, nil
+}
+
 // processAnnounce parses body and records every valid peer entry into
 // this node's discovery registry, seeding future circuit-hop candidates
 // this node has never directly queried. It performs no network I/O.

@@ -1236,12 +1236,11 @@ func (g *Garlic) SendGarlic(id CircuitID, payload []byte) error {
 		return ErrCircuitNotFound
 	}
 
-	onion, firstHop, counter, err := c.Seal(payload)
+	onion, firstHop, legID, counter, expiration, err := c.SealHopLocal(payload, g.cfg.PacketTTL)
 	if err != nil {
 		return err
 	}
-	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
-	msg, err := buildCircuitDataMessage(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	msg, err := buildCircuitDataMessageHopLocal(ephemeralPub, legID, counter, expiration, onion, g.cfg)
 	if err != nil {
 		return err
 	}
@@ -1281,12 +1280,11 @@ func (g *Garlic) SendGarlicBundled(id CircuitID, payload []byte, coverCount int)
 		return ErrCircuitNotFound
 	}
 
-	onion, firstHop, counter, err := c.Seal(payload)
+	onion, firstHop, legID, counter, expiration, err := c.SealHopLocal(payload, g.cfg.PacketTTL)
 	if err != nil {
 		return err
 	}
-	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
-	realEntry, err := buildCircuitDataBody(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	realEntry, err := buildCircuitDataBodyHopLocal(ephemeralPub, legID, counter, expiration, onion, g.cfg)
 	if err != nil {
 		return err
 	}
@@ -1383,12 +1381,11 @@ func (g *Garlic) sendAutoPayload(id CircuitID, kind byte, payload []byte) error 
 	tagged = append(tagged, kind)
 	tagged = append(tagged, payload...)
 
-	onion, firstHop, counter, err := c.Seal(tagged)
+	onion, firstHop, legID, counter, expiration, err := c.SealHopLocal(tagged, g.cfg.PacketTTL)
 	if err != nil {
 		return err
 	}
-	expiration := uint64(time.Now().Add(g.cfg.PacketTTL).Unix())
-	body, err := buildCircuitDataBody(ephemeralPub, id, counter, expiration, onion, g.cfg)
+	body, err := buildCircuitDataBodyHopLocal(ephemeralPub, legID, counter, expiration, onion, g.cfg)
 	if err != nil {
 		return err
 	}
