@@ -552,34 +552,61 @@ func (g *Garlic) AutoPoolStatus() []AutoPoolEntry {
 	return entries
 }
 
-// fillAutoPool tops the auto-pool up to Config.AutoPoolSize, best-effort:
-// a candidate shortage (ErrNoSelfVerifiedCandidates,
-// ErrInsufficientDiverseCandidates, or any AutoCreateCircuit failure)
-// just leaves the pool under target until more peers are discovered - no
-// tight retry loop. Pruned first, so a pool full of entries whose
-// circuits have already been reaped is correctly seen as empty and
-// actually refilled.
+// fillAutoPool adds at most *one* circuit to the auto-pool, and only if
+// the pool is below Config.AutoPoolSize. Best-effort: a candidate
+// shortage (ErrNoSelfVerifiedCandidates, ErrInsufficientDiverseCandidates,
+// or any other AutoCreateCircuit failure) just leaves the pool under
+// target until more peers are discovered - no tight retry loop. Pruned
+// first, so a pool full of entries whose circuits have already been
+// reaped is correctly seen as depleted and actually refilled.
+//
+// One per call, not "loop until full", is deliberate and is the same
+// "never all at once" anti-correlation property rotateAutoPool's doc
+// comment describes, applied to backfill. Building the whole pool inside
+// a single call gives every pool circuit (approximately) one shared
+// creation instant, and therefore one shared expiry instant
+// Config.CircuitLifetime later: CircuitManager.ExpireStale reaps them in
+// the same pass, the maintenance ticker rebuilds them all inside one
+// tick, and the node emits a phase-locked burst of Config.AutoPoolSize
+// simultaneous circuit builds once per CircuitLifetime, forever - a
+// standing fingerprint tying those otherwise unrelated circuits to one
+// originator. Topping up one circuit per call instead leans on
+// autoPoolLoop's existing autoPoolFillRetryInterval maintenance cadence
+// (which already fires repeatedly while the pool is below target) to
+// finish the job over several ticks, which spreads creation - and hence
+// expiry - across roughly (AutoPoolSize-1) x autoPoolFillRetryInterval
+// with no separate per-circuit lifetime jitter needed.
+//
+// The tradeoff is that a cold start reaches full pool size a few seconds
+// later than it otherwise would, since autoPoolLoop's one synchronous
+// pre-loop call now creates a single circuit rather than all of them.
+// That is accepted deliberately: nothing depends on the pool being at
+// target size immediately, and cover traffic and SendGarlicAuto both
+// work fine over a partially filled pool.
 func (g *Garlic) fillAutoPool() {
 	g.pruneAutoPool()
 
 	g.mu.Lock()
 	n := len(g.autoPool)
 	g.mu.Unlock()
-	for ; n < g.cfg.AutoPoolSize; n++ {
-		id, err := g.AutoCreateCircuit(g.cfg.PathLength)
-		if err != nil {
-			return
-		}
-		g.mu.Lock()
-		g.autoPool[id] = time.Now()
-		g.mu.Unlock()
+	if n >= g.cfg.AutoPoolSize {
+		return
 	}
+
+	id, err := g.AutoCreateCircuit(g.cfg.PathLength)
+	if err != nil {
+		return
+	}
+	g.mu.Lock()
+	g.autoPool[id] = time.Now()
+	g.mu.Unlock()
 }
 
 // rotateAutoPool retires exactly one pool circuit (the oldest) per call
-// and immediately tries to rebuild the pool back to target size - never
-// the whole pool at once, so a rotation tick isn't itself a
-// burst-of-circuit-builds fingerprint (see the design doc §7).
+// and immediately tries to build one replacement (fillAutoPool adds at
+// most one circuit per call) - never the whole pool at once, so a
+// rotation tick isn't itself a burst-of-circuit-builds fingerprint (see
+// the design doc §7).
 func (g *Garlic) rotateAutoPool() {
 	g.mu.Lock()
 	var oldestID CircuitID

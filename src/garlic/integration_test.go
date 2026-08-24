@@ -826,6 +826,100 @@ func TestIntegrationAutoPoolFillsToTargetSize(t *testing.T) {
 	}
 }
 
+// TestIntegrationAutoPoolFillStaggersCircuitCreation is the regression
+// test for expiry-driven backfill rebuilding the whole pool as one
+// synchronized burst.
+//
+// fillAutoPool used to loop until the pool reached Config.AutoPoolSize
+// inside a single call, so every pool circuit shared (approximately) one
+// creation instant - and therefore one expiry instant Config.
+// CircuitLifetime later. CircuitManager.ExpireStale then reaped them all
+// in the same pass and autoPoolLoop's maintenance ticker rebuilt them all
+// within one 2-second tick, giving the node a permanent, phase-locked
+// burst of AutoPoolSize simultaneous circuit builds once per
+// CircuitLifetime: exactly the "never all at once" correlation
+// fingerprint rotateAutoPool's doc comment and the design spec call out
+// for steady-state rotation, reintroduced for backfill.
+//
+// fillAutoPool now adds at most one circuit per call and leans on the
+// maintenance ticker's own autoPoolFillRetryInterval (2s) cadence to top
+// the rest up over several ticks, so creation times - and hence expiry
+// times - are naturally spread out.
+//
+// The assertion is deliberately a loose lower bound rather than an exact
+// schedule. autoPoolLoop has two independent wakeup sources that can each
+// drive a fill while the pool is below target (the maintenance ticker,
+// and the rotate/fill timer, which nextAutoPoolInterval caps at
+// autoPoolFillRetryInterval while below target), and those two can land in
+// the same instant - so a pool of three fills in at least two distinct
+// ~2s-apart rounds, not necessarily three. One second is therefore
+// comfortably below the ~2s the fixed code produces and enormously above
+// the sub-millisecond span the old fill-in-one-call code produced.
+func TestIntegrationAutoPoolFillStaggersCircuitCreation(t *testing.T) {
+	nodeA := newLinkedTestNode(t)
+	nodeB := newLinkedTestNode(t)
+	all := []*core.Core{nodeA, nodeB}
+	for _, n := range all {
+		defer n.Stop()
+	}
+	connectChain(t, all)
+	pumpAll(all)
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+
+	cfgB := garlic.DefaultConfig()
+	cfgB.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(nodeB, idB, cfgB, garlic.NewStaticRendezvous())
+	defer gB.Close()
+
+	const poolSize = 3
+	cfgA := garlic.DefaultConfig()
+	cfgA.CapabilityTimeout = 2 * time.Second
+	cfgA.MinHopCount = 0
+	cfgA.PathLength = 1
+	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.AutoPoolEnabled = true
+	cfgA.AutoPoolSize = poolSize
+	cfgA.AutoRotationInterval = 5 * time.Minute // rotation must never churn CreatedAt during this test
+	cfgA.CoverTrafficEnabled = false            // isolate fill behavior from cover-traffic noise
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	var entries []garlic.AutoPoolEntry
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		entries = gA.AutoPoolStatus()
+		if len(entries) == poolSize {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-pool never reached target size %d; status: %+v", poolSize, entries)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	first, last := entries[0].CreatedAt, entries[0].CreatedAt
+	for _, e := range entries[1:] {
+		if e.CreatedAt.Before(first) {
+			first = e.CreatedAt
+		}
+		if e.CreatedAt.After(last) {
+			last = e.CreatedAt
+		}
+	}
+	const minSpan = time.Second
+	if span := last.Sub(first); span < minSpan {
+		t.Fatalf("pool circuits' CreatedAt span = %s, want at least %s: all %d circuits were built in one burst, so they will also expire in one burst; entries=%+v", span, minSpan, poolSize, entries)
+	}
+}
+
 func TestIntegrationAutoPoolRotatesOneCircuitAtATime(t *testing.T) {
 	nodeA := newLinkedTestNode(t)
 	nodeB := newLinkedTestNode(t)
