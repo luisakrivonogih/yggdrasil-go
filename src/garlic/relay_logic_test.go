@@ -474,6 +474,79 @@ func TestProcessCircuitDataPlainDeliverIsNotTagged(t *testing.T) {
 	}
 }
 
+func TestProcessCircuitDataHopLocalForwardsNextLegMetadata(t *testing.T) {
+	relayID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (relay) returned error: %v", err)
+	}
+	nextID, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (next hop) returned error: %v", err)
+	}
+
+	ephemeralPub, ephemeralPriv, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair returned error: %v", err)
+	}
+	secret, err := ECDH(ephemeralPriv, relayID.PublicKey)
+	if err != nil {
+		t.Fatalf("ECDH returned error: %v", err)
+	}
+	relayKey, err := deriveLayerKeyHopLocal(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKeyHopLocal returned error: %v", err)
+	}
+
+	nextLegID := CircuitID{7, 7, 7}
+	layer := &LayerPlaintext{
+		NextHop:             nextID.PublicKey,
+		NextHopEphemeral:    make([]byte, KeySize),
+		Inner:               []byte("forwarded ciphertext placeholder"),
+		NextLocalCircuitID:  nextLegID[:],
+		NextLocalCounter:    123,
+		NextLocalExpiration: uint64(time.Now().Add(time.Minute).Unix()),
+	}
+	ciphertext, err := EncryptLayerHopLocal(relayKey, 0, layer)
+	if err != nil {
+		t.Fatalf("EncryptLayerHopLocal returned error: %v", err)
+	}
+	env := &Envelope{
+		Version:       EnvelopeVersion2,
+		CircuitID:     CircuitID{1, 1, 1},
+		PacketCounter: 0,
+		Expiration:    uint64(time.Now().Add(time.Minute).Unix()),
+		Body:          ciphertext,
+	}
+	envBytes, err := env.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	body := append(append([]byte(nil), ephemeralPub...), envBytes...)
+
+	relay := hopGarlicFor(relayID)
+	action := relay.processCircuitData(body, msgTypeCircuitData)
+	if action.kind != actionForward {
+		t.Fatalf("action.kind = %v, want actionForward", action.kind)
+	}
+
+	forwardedEnv, err := Unmarshal(action.forwardMsg[1+KeySize:])
+	if err != nil {
+		t.Fatalf("Unmarshal (forwarded envelope) returned error: %v", err)
+	}
+	if forwardedEnv.Version != EnvelopeVersion2 {
+		t.Fatalf("forwarded Envelope.Version = %d, want EnvelopeVersion2", forwardedEnv.Version)
+	}
+	if forwardedEnv.CircuitID != nextLegID {
+		t.Fatalf("forwarded Envelope.CircuitID = %x, want %x (NextLocalCircuitID, not the incoming leg's ID)", forwardedEnv.CircuitID, nextLegID)
+	}
+	if forwardedEnv.PacketCounter != 123 {
+		t.Fatalf("forwarded Envelope.PacketCounter = %d, want 123 (NextLocalCounter, not the incoming leg's counter)", forwardedEnv.PacketCounter)
+	}
+	if forwardedEnv.Expiration != layer.NextLocalExpiration {
+		t.Fatalf("forwarded Envelope.Expiration = %d, want %d (NextLocalExpiration, not the incoming leg's expiration)", forwardedEnv.Expiration, layer.NextLocalExpiration)
+	}
+}
+
 func TestProcessAnnounceRecordsPeers(t *testing.T) {
 	g := newTestGarlic(t)
 	msg := &AnnounceMessage{Peers: []AnnouncePeer{

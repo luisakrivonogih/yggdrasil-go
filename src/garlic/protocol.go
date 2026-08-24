@@ -92,10 +92,6 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 		g.security.malformedPackets.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
-	if env.Version != EnvelopeVersion1 {
-		g.security.malformedPackets.Add(1)
-		return circuitAction{kind: actionDrop}
-	}
 	if time.Now().Unix() > int64(env.Expiration) {
 		g.security.expiredPackets.Add(1)
 		return circuitAction{kind: actionDrop}
@@ -117,31 +113,42 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
+
+	switch env.Version {
+	case EnvelopeVersion1:
+		return g.processCircuitDataLegacy(secret, env, msgType)
+	case EnvelopeVersion2:
+		return g.processCircuitDataHopLocal(secret, env, msgType)
+	default:
+		// Unreachable: Unmarshal already rejects any other Version.
+		g.security.malformedPackets.Add(1)
+		return circuitAction{kind: actionDrop}
+	}
+}
+
+// processCircuitDataLegacy handles an EnvelopeVersion1 message: unchanged
+// from processCircuitData's original body (deriveLayerKey/DecryptLayer,
+// verbatim CircuitID/PacketCounter/Expiration forwarding). Kept only so
+// this node can still relay another, not-yet-upgraded peer's legacy
+// circuit - see EnvelopeVersion1's doc comment (envelope.go).
+func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType byte) circuitAction {
+	circuitID := env.CircuitID
 	key, err := deriveLayerKey(secret)
 	if err != nil {
 		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
-
 	layer, err := DecryptLayer(key, env.PacketCounter, env.Body)
 	if err != nil {
-		// Wrong key (message wasn't encrypted for us), tampered
-		// ciphertext, or malformed plaintext all look identical here by
-		// design - see ErrNotForThisIdentity's doc comment.
 		g.security.authFailures.Add(1)
 		return circuitAction{kind: actionDrop}
 	}
-
 	if len(layer.NextHop) == 0 {
 		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}
 	}
 	if len(layer.NextHopEphemeral) != KeySize {
-		// A well-formed intermediate layer always carries the next hop's
-		// ephemeral key; anything else is malformed or malicious input,
-		// treated identically to any other unforwardable message.
 		return circuitAction{kind: actionDrop}
 	}
-
 	nextEnv := &Envelope{
 		Version:       EnvelopeVersion1,
 		CircuitID:     env.CircuitID,
@@ -149,10 +156,6 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 		Expiration:    env.Expiration,
 		Body:          layer.Inner,
 	}
-	// Independently re-randomize this hop's outgoing wire size (see
-	// Config.PaddingEnabled's doc comment) - a config error here (e.g.
-	// MaxPaddedSize too small for this body) degrades to unpadded
-	// forwarding rather than dropping an otherwise-valid packet.
 	if g.cfg.PaddingEnabled {
 		_ = nextEnv.PadToRandomRange(g.cfg.MinPaddedSize, g.cfg.MaxPaddedSize)
 	}
@@ -165,7 +168,57 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 	forwardMsg = append(forwardMsg, msgType)
 	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
+	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
+}
 
+// processCircuitDataHopLocal handles an EnvelopeVersion2 message:
+// deriveLayerKeyHopLocal/DecryptLayerHopLocal, and - the actual fix this
+// plan exists for - forwards using the just-decrypted layer's
+// NextLocalCircuitID/NextLocalCounter/NextLocalExpiration instead of
+// copying env's own (incoming-leg) values. See
+// docs/superpowers/specs/2026-08-24-garlic-hop-local-metadata-design.md.
+func (g *Garlic) processCircuitDataHopLocal(secret []byte, env *Envelope, msgType byte) circuitAction {
+	circuitID := env.CircuitID
+	key, err := deriveLayerKeyHopLocal(secret)
+	if err != nil {
+		g.security.authFailures.Add(1)
+		return circuitAction{kind: actionDrop}
+	}
+	layer, err := DecryptLayerHopLocal(key, env.PacketCounter, env.Body)
+	if err != nil {
+		g.security.authFailures.Add(1)
+		return circuitAction{kind: actionDrop}
+	}
+	if len(layer.NextHop) == 0 {
+		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}
+	}
+	if len(layer.NextHopEphemeral) != KeySize {
+		return circuitAction{kind: actionDrop}
+	}
+	if len(layer.NextLocalCircuitID) != 16 {
+		return circuitAction{kind: actionDrop}
+	}
+	var nextID CircuitID
+	copy(nextID[:], layer.NextLocalCircuitID)
+	nextEnv := &Envelope{
+		Version:       EnvelopeVersion2,
+		CircuitID:     nextID,
+		PacketCounter: layer.NextLocalCounter,
+		Expiration:    layer.NextLocalExpiration,
+		Body:          layer.Inner,
+	}
+	if g.cfg.PaddingEnabled {
+		_ = nextEnv.PadToRandomRange(g.cfg.MinPaddedSize, g.cfg.MaxPaddedSize)
+	}
+	nextBytes, err := nextEnv.Marshal()
+	if err != nil {
+		g.security.malformedPackets.Add(1)
+		return circuitAction{kind: actionDrop}
+	}
+	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
+	forwardMsg = append(forwardMsg, msgType)
+	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
+	forwardMsg = append(forwardMsg, nextBytes...)
 	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
 }
 
