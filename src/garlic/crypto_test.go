@@ -2,6 +2,7 @@ package garlic
 
 import (
 	"bytes"
+	"crypto/rand"
 	"testing"
 )
 
@@ -296,5 +297,35 @@ func TestSendAndRecvDirectionLabelsProduceDifferentKeys(t *testing.T) {
 	}
 	if bytes.Equal(sendKey, recvKey) {
 		t.Error("send and recv direction labels produced the same key from the same establish secret - a reflected packet would decrypt under the wrong direction's key")
+	}
+}
+
+func TestDeriveLayerKeyHopLocalDiffersFromLegacy(t *testing.T) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatalf("rand.Read returned error: %v", err)
+	}
+	legacyKey, err := deriveLayerKey(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKey returned error: %v", err)
+	}
+	hopLocalKey, err := deriveLayerKeyHopLocal(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKeyHopLocal returned error: %v", err)
+	}
+	if bytes.Equal(legacyKey, hopLocalKey) {
+		t.Fatal("deriveLayerKeyHopLocal produced the same key as deriveLayerKey from the same secret - labels are not actually separating the two chains")
+	}
+	if len(hopLocalKey) != KeySize {
+		t.Fatalf("deriveLayerKeyHopLocal key length = %d, want %d", len(hopLocalKey), KeySize)
+	}
+
+	// Deterministic: same secret must always derive the same hop-local key.
+	again, err := deriveLayerKeyHopLocal(secret)
+	if err != nil {
+		t.Fatalf("deriveLayerKeyHopLocal (second call) returned error: %v", err)
+	}
+	if !bytes.Equal(hopLocalKey, again) {
+		t.Fatal("deriveLayerKeyHopLocal is not deterministic for the same input secret")
 	}
 }

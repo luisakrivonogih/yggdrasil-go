@@ -46,6 +46,19 @@ const (
 	LabelCircuitDataRecv  = "yggdrasil-garlic-v2-circuit-data-recv"
 )
 
+// Domain-separation labels for the hop-local envelope format
+// (EnvelopeVersion2, capability garlic-v3 - see capability.go's doc
+// comment for why that name is unrelated to msgTypeCircuitDataV3).
+// Parallel structure to the v2 labels above by design: this is the same
+// establish-then-data HKDF chaining, just under a distinct label so a
+// v2-only relay that received a hop-local-format packet would derive a
+// completely different key and fail AEAD authentication outright, never
+// a plausible-looking wrong plaintext.
+const (
+	LabelCircuitEstablishHopLocal = "yggdrasil-garlic-hoplocal-circuit-establish"
+	LabelCircuitDataSendHopLocal  = "yggdrasil-garlic-hoplocal-circuit-data-send"
+)
+
 var (
 	ErrInvalidKeySize   = errors.New("garlic: invalid key size")
 	ErrDecryptionFailed = errors.New("garlic: decryption failed")
@@ -162,4 +175,18 @@ func deriveLayerKey(ecdhSecret []byte) ([]byte, error) {
 		return nil, err
 	}
 	return DeriveKey(establishSecret, nil, LabelCircuitDataSend)
+}
+
+// deriveLayerKeyHopLocal is deriveLayerKey's counterpart for the
+// hop-local envelope format (EnvelopeVersion2) - same two-stage HKDF
+// chain, under LabelCircuitEstablishHopLocal/LabelCircuitDataSendHopLocal
+// instead of the v2 labels, so a key derived here is cryptographically
+// unrelated to one derived by deriveLayerKey from the same raw ECDH
+// secret.
+func deriveLayerKeyHopLocal(ecdhSecret []byte) ([]byte, error) {
+	establishSecret, err := DeriveKey(ecdhSecret, nil, LabelCircuitEstablishHopLocal)
+	if err != nil {
+		return nil, err
+	}
+	return DeriveKey(establishSecret, nil, LabelCircuitDataSendHopLocal)
 }
