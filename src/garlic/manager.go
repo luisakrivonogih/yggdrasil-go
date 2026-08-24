@@ -177,6 +177,7 @@ var (
 	ErrPoolNotFound                 = errors.New("garlic: circuit pool not found")
 	ErrEmptyPool                    = errors.New("garlic: circuit pool must have at least one path")
 	ErrHopMissingAutoCircuitSupport = errors.New("garlic: candidate hop does not support CapabilityAutoCircuit")
+	ErrHopMissingGarlicV3Support    = errors.New("garlic: candidate hop does not support CapabilityGarlicV3 (hop-local envelope format)")
 )
 
 // DeliveredMessage is an application payload that arrived because this
@@ -1083,6 +1084,11 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 	if len(path) == 0 || len(path) != len(nodeKeys) {
 		return CircuitID{}, ErrInvalidPath
 	}
+	for i := range path {
+		if !path[i].SupportsGarlicV3() {
+			return CircuitID{}, ErrHopMissingGarlicV3Support
+		}
+	}
 
 	ephemeralPubs := make([][]byte, len(path))
 	ephemeralPrivs := make([][]byte, len(path))
@@ -1100,7 +1106,7 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 		if err != nil {
 			return CircuitID{}, err
 		}
-		key, err := deriveLayerKey(secret)
+		key, err := deriveLayerKeyHopLocal(secret)
 		if err != nil {
 			return CircuitID{}, err
 		}
@@ -1108,7 +1114,21 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 		if i+1 < len(path) {
 			nextEphemeral = ephemeralPubs[i+1]
 		}
-		hops[i] = Hop{NodeKey: nodeKeys[i], Key: key, NextEphemeralPub: nextEphemeral}
+		localID, err := randomCircuitID()
+		if err != nil {
+			return CircuitID{}, err
+		}
+		counterOffset, err := randomCounterOffset()
+		if err != nil {
+			return CircuitID{}, err
+		}
+		hops[i] = Hop{
+			NodeKey:          nodeKeys[i],
+			Key:              key,
+			Counter:          counterOffset,
+			NextEphemeralPub: nextEphemeral,
+			LocalCircuitID:   localID,
+		}
 	}
 
 	c, err := g.circuits.Add(hops, g.cfg.CircuitLifetime, g.cfg.MaxPacketsPerCircuit, g.cfg.MaxBytesPerCircuit)

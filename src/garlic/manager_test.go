@@ -270,7 +270,7 @@ func addTestAutoPoolCircuit(t *testing.T, g *Garlic) CircuitID {
 		t.Fatalf("NewIdentity returned error: %v", err)
 	}
 	id, err := g.CreateCircuit(
-		[]CapabilityMessage{{Versions: []string{CapabilityGarlicV2, CapabilityAutoCircuit}, PublicKey: hop.PublicKey}},
+		[]CapabilityMessage{{Versions: []string{CapabilityGarlicV2, CapabilityGarlicV3, CapabilityAutoCircuit}, PublicKey: hop.PublicKey}},
 		[][]byte{hop.PublicKey},
 	)
 	if err != nil {
@@ -353,5 +353,44 @@ func TestSendCoverTrafficStaggersSendsAcrossTheInterval(t *testing.T) {
 	// straggle past the round it belongs to.
 	if late := last.Sub(start); late > interval+collectSlop {
 		t.Fatalf("last cover send landed %v after sendCoverTraffic, want within %v", late, interval)
+	}
+}
+
+func TestCreateCircuitSetsLocalCircuitIDsAndRejectsV2OnlyHop(t *testing.T) {
+	g, hopIDs := buildThreeHopOriginator(t)
+
+	// Every hop advertises garlic-v3: CreateCircuit must succeed and give
+	// each hop a distinct, non-zero LocalCircuitID.
+	path := make([]CapabilityMessage, len(hopIDs))
+	nodeKeys := make([][]byte, len(hopIDs))
+	for i, id := range hopIDs {
+		path[i] = CapabilityMessage{Versions: []string{CapabilityGarlicV2, CapabilityGarlicV3}, PublicKey: id.PublicKey}
+		nodeKeys[i] = []byte{byte('A' + i)}
+	}
+	circuitID, err := g.CreateCircuit(path, nodeKeys)
+	if err != nil {
+		t.Fatalf("CreateCircuit returned error: %v", err)
+	}
+	c, ok := g.circuits.Get(circuitID)
+	if !ok {
+		t.Fatal("circuit not found after CreateCircuit")
+	}
+	seen := make(map[CircuitID]bool)
+	for i, h := range c.hops {
+		if h.LocalCircuitID == (CircuitID{}) {
+			t.Fatalf("hop %d has zero-value LocalCircuitID", i)
+		}
+		if seen[h.LocalCircuitID] {
+			t.Fatalf("hop %d reused another hop's LocalCircuitID", i)
+		}
+		seen[h.LocalCircuitID] = true
+	}
+
+	// A hop that never advertised garlic-v3 must be rejected outright.
+	pathMissingV3 := make([]CapabilityMessage, len(hopIDs))
+	copy(pathMissingV3, path)
+	pathMissingV3[1] = CapabilityMessage{Versions: []string{CapabilityGarlicV2}, PublicKey: hopIDs[1].PublicKey}
+	if _, err := g.CreateCircuit(pathMissingV3, nodeKeys); err != ErrHopMissingGarlicV3Support {
+		t.Fatalf("CreateCircuit error = %v, want ErrHopMissingGarlicV3Support", err)
 	}
 }

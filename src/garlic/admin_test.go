@@ -168,7 +168,7 @@ func TestGetGarlicCircuitsResponseShapeAndNoSecrets(t *testing.T) {
 	nodeKey := nodeIdentity.PublicKey
 
 	circuitID, err := g.CreateCircuit(
-		[]garlic.CapabilityMessage{{Versions: []string{"garlic-v1"}, PublicKey: hopIdentity.PublicKey}},
+		[]garlic.CapabilityMessage{{Versions: []string{"garlic-v1", garlic.CapabilityGarlicV3}, PublicKey: hopIdentity.PublicKey}},
 		[][]byte{nodeKey},
 	)
 	if err != nil {
