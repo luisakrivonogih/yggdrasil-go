@@ -269,7 +269,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		relayState:      newRelayCircuitState(cfg.MaxRelayCircuits),
 		limiter:         NewRateLimiter(cfg.RatePerSecond, cfg.RateBurst, cfg.MaxTrackedPeers),
 		rendezvous:      rendezvous,
-		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers),
+		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers, c.PublicKey()),
 		delivered:       make(chan DeliveredMessage, 256),
 		autoDelivered:   make(chan AutoDeliveredMessage, 256),
 		capabilityCache: make(map[string]*CapabilityMessage),
@@ -491,29 +491,58 @@ func (g *Garlic) SelectPath(n int) ([]HopCandidate, error) {
 // CapabilityAutoCircuit - see
 // docs/superpowers/specs/2026-08-23-garlic-autonomous-routing-design.md
 // §6/§8 for why every position, not just the terminal one, is gated.
+//
+// Selection itself (SelectPathWithGuardPolicy/candidatePool) has no
+// concept of protocol version - it only ever sees mesh topology - so a
+// version-incompatible pick (a peer still on garlic-v2, not yet upgraded
+// to the hop-local envelope format) is expected in a mixed-version mesh,
+// not a reason to give up outright. On that failure the offending
+// candidate is excluded and selection retried from the remaining pool,
+// up to once per pool member - each retry strictly shrinks the pool, so
+// this always terminates. If every retry is exhausted this way, the last
+// version-related error is returned in preference to the generic
+// "not enough candidates" SelectPathWithGuardPolicy would otherwise
+// report, since it names the actual, actionable reason (upgrade that
+// peer) rather than just the symptom.
 func (g *Garlic) AutoCreateCircuit(n int) (CircuitID, error) {
-	hops, err := SelectPathWithGuardPolicy(g.candidatePool(), n, g.cfg.MinHopCount)
-	if err != nil {
-		return CircuitID{}, err
-	}
+	pool := g.candidatePool()
+	excluded := map[string]bool{}
+	var lastVersionErr error
 
-	path := make([]CapabilityMessage, len(hops))
-	nodeKeys := make([][]byte, len(hops))
-	for i, h := range hops {
-		capability, err := g.QueryCapability(h.NodeKey)
+	for {
+		hops, err := SelectPathWithGuardPolicy(excludeCandidates(pool, excluded), n, g.cfg.MinHopCount)
 		if err != nil {
-			return CircuitID{}, fmt.Errorf("hop %d: %w", i, err)
+			if lastVersionErr != nil {
+				return CircuitID{}, lastVersionErr
+			}
+			return CircuitID{}, err
 		}
-		if !capability.SupportsGarlicV3() {
-			return CircuitID{}, fmt.Errorf("hop %d: %w", i, ErrHopMissingGarlicV3Support)
+
+		path := make([]CapabilityMessage, len(hops))
+		nodeKeys := make([][]byte, len(hops))
+		incompatible := false
+		for i, h := range hops {
+			capability, err := g.QueryCapability(h.NodeKey)
+			if err != nil {
+				return CircuitID{}, fmt.Errorf("hop %d: %w", i, err)
+			}
+			if !capability.SupportsGarlicV3() {
+				lastVersionErr = fmt.Errorf("hop %d: %w", i, ErrHopMissingGarlicV3Support)
+			} else if !capability.SupportsAutoCircuit() {
+				lastVersionErr = fmt.Errorf("hop %d: %w", i, ErrHopMissingAutoCircuitSupport)
+			} else {
+				path[i] = *capability
+				nodeKeys[i] = h.NodeKey
+				continue
+			}
+			excluded[string(h.NodeKey)] = true
+			incompatible = true
+			break
 		}
-		if !capability.SupportsAutoCircuit() {
-			return CircuitID{}, fmt.Errorf("hop %d: %w", i, ErrHopMissingAutoCircuitSupport)
+		if !incompatible {
+			return g.CreateCircuit(path, nodeKeys)
 		}
-		path[i] = *capability
-		nodeKeys[i] = h.NodeKey
 	}
-	return g.CreateCircuit(path, nodeKeys)
 }
 
 // AutoPoolEntry is a point-in-time summary of one auto-pool circuit, for

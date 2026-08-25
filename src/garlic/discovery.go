@@ -135,21 +135,34 @@ type DiscoveredPeer struct {
 // once at capacity evicts the least-recently-seen entry rather than
 // growing without bound.
 type discoveryRegistry struct {
-	mu    sync.Mutex
-	max   int
-	peers map[string]DiscoveredPeer
+	mu      sync.Mutex
+	max     int
+	selfKey string
+	peers   map[string]DiscoveredPeer
 }
 
-func newDiscoveryRegistry(max int) *discoveryRegistry {
-	return &discoveryRegistry{max: max, peers: make(map[string]DiscoveredPeer)}
+// newDiscoveryRegistry returns an empty registry bounded to max entries.
+// selfKey is this node's own Yggdrasil node key (core.Core.PublicKey()) -
+// record() silently drops any entry keyed by it, since a node's own key
+// gossiped back to it (a stale echo from a peer that cached this node's
+// pre-restart Garlic identity, or any other reflection) is never a
+// legitimate distinct circuit-hop candidate. nil/empty is fine for tests
+// that don't exercise self-filtering.
+func newDiscoveryRegistry(max int, selfKey []byte) *discoveryRegistry {
+	return &discoveryRegistry{max: max, selfKey: string(selfKey), peers: make(map[string]DiscoveredPeer)}
 }
 
-// record adds or refreshes a peer's entry, stamping LastSeen as now.
-// SelfVerified is never downgraded: once a peer has been personally
-// capability-verified, a later secondhand gossip mention of the same key
-// still leaves it marked self-verified.
+// record adds or refreshes a peer's entry, stamping LastSeen as now. A
+// peer keyed by this registry's own selfKey is silently dropped - see
+// newDiscoveryRegistry's doc comment. SelfVerified is never downgraded:
+// once a peer has been personally capability-verified, a later
+// secondhand gossip mention of the same key still leaves it marked
+// self-verified.
 func (r *discoveryRegistry) record(p DiscoveredPeer) {
 	key := string(p.NodeKey)
+	if r.selfKey != "" && key == r.selfKey {
+		return
+	}
 	p.LastSeen = time.Now()
 
 	r.mu.Lock()

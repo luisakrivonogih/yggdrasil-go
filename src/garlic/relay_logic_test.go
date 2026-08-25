@@ -91,7 +91,7 @@ func newTestGarlic(t *testing.T) *Garlic {
 		relayState:      newRelayCircuitState(1024),
 		delivered:       make(chan DeliveredMessage, 256),
 		autoDelivered:   make(chan AutoDeliveredMessage, 256),
-		discovery:       newDiscoveryRegistry(1024),
+		discovery:       newDiscoveryRegistry(1024, nil),
 		capabilityCache: make(map[string]*CapabilityMessage),
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),

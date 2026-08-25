@@ -24,6 +24,7 @@ package garlic
 // package garlic_test).
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -139,5 +140,127 @@ func TestAutoCreateCircuitRejectsCandidateMissingGarlicV3(t *testing.T) {
 	}
 	if after := len(gOrigin.OriginatedCircuits()); after != before {
 		t.Fatalf("OriginatedCircuits count = %d, want unchanged %d (a rejected candidate must not leave a circuit behind)", after, before)
+	}
+}
+
+// TestAutoCreateCircuitSkipsV2OnlyCandidateWhenAV3AlternativeExists is
+// the regression test for the companion finding: a mixed-version mesh
+// (some peers already upgraded to garlic-v3, some not yet) must not make
+// AutoCreateCircuit give up outright the moment selection happens to
+// land on one of the not-yet-upgraded peers - it must fall back to a
+// compatible candidate when the pool has one, the same way an operator
+// manually retrying with a different hop would. This is exactly the
+// live-network scenario that motivated the fix: a small test mesh where
+// most peers hadn't been redeployed yet.
+func TestAutoCreateCircuitSkipsV2OnlyCandidateWhenAV3AlternativeExists(t *testing.T) {
+	origin := newLinkedCoreForAutoCircuitTest(t)
+	defer origin.Stop()
+	candidateV2 := newLinkedCoreForAutoCircuitTest(t)
+	defer candidateV2.Stop()
+	candidateV3 := newLinkedCoreForAutoCircuitTest(t)
+	defer candidateV3.Stop()
+
+	listenURL, err := url.Parse("tcp://localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := origin.Listen(listenURL, "")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	peerURL, err := url.Parse("tcp://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := candidateV2.CallPeer(peerURL, ""); err != nil {
+		t.Fatalf("CallPeer (candidateV2) returned error: %v", err)
+	}
+	if err := candidateV3.CallPeer(peerURL, ""); err != nil {
+		t.Fatalf("CallPeer (candidateV3) returned error: %v", err)
+	}
+
+	for _, n := range []*core.Core{origin, candidateV2, candidateV3} {
+		go func(n *core.Core) {
+			buf := make([]byte, 65535)
+			for {
+				if _, _, err := n.ReadFrom(buf); err != nil {
+					return
+				}
+			}
+		}(n)
+	}
+
+	idOrigin, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (origin) returned error: %v", err)
+	}
+	idCandidateV2, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (candidateV2) returned error: %v", err)
+	}
+	idCandidateV3, err := NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (candidateV3) returned error: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	cfg.MinHopCount = 0 // this tiny topology has no room for a real distance filter
+
+	gOrigin := New(origin, idOrigin, cfg, NewStaticRendezvous())
+	defer gOrigin.Close()
+	gCandidateV2 := New(candidateV2, idCandidateV2, cfg, NewStaticRendezvous())
+	defer gCandidateV2.Close()
+	gCandidateV3 := New(candidateV3, idCandidateV3, cfg, NewStaticRendezvous())
+	defer gCandidateV3.Close()
+
+	for _, target := range []*core.Core{candidateV2, candidateV3} {
+		var verified bool
+		for attempt := 0; attempt < bootstrapMaxAttempts; attempt++ {
+			if _, err := gOrigin.QueryCapability(target.PublicKey()); err == nil {
+				verified = true
+				break
+			}
+		}
+		if !verified {
+			t.Fatalf("capability query against %x never succeeded", target.PublicKey())
+		}
+	}
+
+	// Downgrade candidateV2's cached answer to simulate a peer still on
+	// garlic-v2 - candidateV3's real, unmodified answer already
+	// advertises CapabilityGarlicV3 (see manager.go's capability
+	// advertisement), so it needs no override.
+	key := hex.EncodeToString(candidateV2.PublicKey())
+	gOrigin.mu.Lock()
+	gOrigin.capabilityCache[key] = &CapabilityMessage{
+		Versions:  []string{CapabilityGarlicV2, CapabilityAutoCircuit},
+		PublicKey: idCandidateV2.PublicKey,
+	}
+	gOrigin.mu.Unlock()
+
+	id, err := gOrigin.AutoCreateCircuit(1)
+	if err != nil {
+		t.Fatalf("AutoCreateCircuit returned error: %v, want success by falling back to the v3-capable candidate", err)
+	}
+
+	var built *Circuit
+	for _, c := range gOrigin.OriginatedCircuits() {
+		if c.ID == id {
+			built = c
+		}
+	}
+	if built == nil {
+		t.Fatal("AutoCreateCircuit returned an ID not present in OriginatedCircuits()")
+	}
+	hopKeys := built.HopKeys()
+	if len(hopKeys) != 1 {
+		t.Fatalf("circuit has %d hops, want 1", len(hopKeys))
+	}
+	// HopKeys() reports each hop's Yggdrasil node key (Hop.NodeKey, as
+	// selected by candidatePool()/HopCandidate.NodeKey) - not its Garlic
+	// identity key - so compare against candidateV3's core public key.
+	if !bytes.Equal(hopKeys[0], candidateV3.PublicKey()) {
+		t.Fatalf("circuit's hop = %x, want the v3-capable candidate %x (the v2-only candidate must never be used)", hopKeys[0], candidateV3.PublicKey())
 	}
 }

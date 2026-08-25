@@ -86,7 +86,7 @@ func TestUnmarshalAnnounceMessageRejectsLengthExceedingBuffer(t *testing.T) {
 }
 
 func TestDiscoveryRegistryRecordAndList(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga")})
 	r.record(DiscoveredPeer{NodeKey: []byte("b"), GarlicPublicKey: []byte("gb")})
 
@@ -97,7 +97,7 @@ func TestDiscoveryRegistryRecordAndList(t *testing.T) {
 }
 
 func TestDiscoveryRegistryRecordUpdatesExisting(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga-old")})
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga-new")})
 
@@ -111,7 +111,7 @@ func TestDiscoveryRegistryRecordUpdatesExisting(t *testing.T) {
 }
 
 func TestDiscoveryRegistryEvictsOldestWhenFull(t *testing.T) {
-	r := newDiscoveryRegistry(2)
+	r := newDiscoveryRegistry(2, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("old"), GarlicPublicKey: []byte("g")})
 	// Force a distinguishable LastSeen ordering.
 	time.Sleep(2 * time.Millisecond)
@@ -131,7 +131,7 @@ func TestDiscoveryRegistryEvictsOldestWhenFull(t *testing.T) {
 }
 
 func TestDiscoveryRegistrySampleBounded(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	for i := range 10 {
 		r.record(DiscoveredPeer{NodeKey: []byte{byte(i)}, GarlicPublicKey: []byte("g")})
 	}
@@ -142,7 +142,7 @@ func TestDiscoveryRegistrySampleBounded(t *testing.T) {
 }
 
 func TestDiscoveryRegistrySampleCappedByAvailable(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("g")})
 	sample := r.sample(5)
 	if len(sample) != 1 {
@@ -151,7 +151,7 @@ func TestDiscoveryRegistrySampleCappedByAvailable(t *testing.T) {
 }
 
 func TestDiscoveryRegistryRecordSelfVerifiedDefaultsFalse(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga")})
 
 	peers := r.list()
@@ -161,7 +161,7 @@ func TestDiscoveryRegistryRecordSelfVerifiedDefaultsFalse(t *testing.T) {
 }
 
 func TestDiscoveryRegistryRecordSelfVerifiedTrue(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga"), SelfVerified: true})
 
 	peers := r.list()
@@ -171,7 +171,7 @@ func TestDiscoveryRegistryRecordSelfVerifiedTrue(t *testing.T) {
 }
 
 func TestDiscoveryRegistryRecordNeverDowngradesSelfVerified(t *testing.T) {
-	r := newDiscoveryRegistry(16)
+	r := newDiscoveryRegistry(16, nil)
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga"), SelfVerified: true})
 	// A later gossip mention of the same key, unverified by us directly.
 	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga-refreshed"), SelfVerified: false})
@@ -185,5 +185,43 @@ func TestDiscoveryRegistryRecordNeverDowngradesSelfVerified(t *testing.T) {
 	}
 	if string(peers[0].GarlicPublicKey) != "ga-refreshed" {
 		t.Fatalf("GarlicPublicKey = %q, want %q (other fields still refresh)", peers[0].GarlicPublicKey, "ga-refreshed")
+	}
+}
+
+// TestDiscoveryRegistryRecordDropsSelfKey is the regression test for a
+// live-network finding: a node's own Yggdrasil node key can come back to
+// it through gossip (msgTypeAnnounce) or a capability response - e.g.
+// another peer still holding a stale AnnouncePeer entry for this node
+// from before its own Garlic identity churned across a restart (Garlic
+// keys are ephemeral unless Garlic.PrivateKey is configured). Recording
+// that entry would let this node select itself as one of its own
+// "diverse" circuit hops. selfKey must be dropped, not merely
+// deduplicated.
+func TestDiscoveryRegistryRecordDropsSelfKey(t *testing.T) {
+	r := newDiscoveryRegistry(16, []byte("self"))
+	r.record(DiscoveredPeer{NodeKey: []byte("self"), GarlicPublicKey: []byte("stale-garlic-key")})
+	r.record(DiscoveredPeer{NodeKey: []byte("other"), GarlicPublicKey: []byte("g")})
+
+	peers := r.list()
+	if len(peers) != 1 {
+		t.Fatalf("list() returned %d peers, want 1 (self-keyed entry must be dropped)", len(peers))
+	}
+	if string(peers[0].NodeKey) != "other" {
+		t.Fatalf("list()[0].NodeKey = %q, want %q", peers[0].NodeKey, "other")
+	}
+}
+
+// TestDiscoveryRegistryRecordWithoutSelfKeyDoesNotFilter guards against
+// an over-eager fix: an empty/unset selfKey (nil, as in every other test
+// in this file, and as a fresh registry would have before New() learns
+// its core.Core's public key) must not accidentally match and drop
+// legitimately empty-keyed input - it must simply not filter at all.
+func TestDiscoveryRegistryRecordWithoutSelfKeyDoesNotFilter(t *testing.T) {
+	r := newDiscoveryRegistry(16, nil)
+	r.record(DiscoveredPeer{NodeKey: []byte("a"), GarlicPublicKey: []byte("ga")})
+
+	peers := r.list()
+	if len(peers) != 1 {
+		t.Fatalf("list() returned %d peers, want 1", len(peers))
 	}
 }

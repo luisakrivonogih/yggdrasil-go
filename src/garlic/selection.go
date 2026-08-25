@@ -84,6 +84,24 @@ func selectDiversePathFrom(pool []HopCandidate, n, minHopCount int, usedParents 
 	return selected, nil
 }
 
+// excludeCandidates returns the subset of pool whose NodeKey is not a
+// key in excluded. Used by AutoCreateCircuit to retry selection after
+// dropping a candidate that failed a post-selection check (e.g. a
+// protocol-version gate) - selection itself has no notion of exclusion,
+// so this filters the pool before the next attempt instead.
+func excludeCandidates(pool []HopCandidate, excluded map[string]bool) []HopCandidate {
+	if len(excluded) == 0 {
+		return pool
+	}
+	out := make([]HopCandidate, 0, len(pool))
+	for _, c := range pool {
+		if !excluded[string(c.NodeKey)] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // sortByHopCountDescending is a small insertion sort - candidate pools
 // for a circuit are expected to be small (dozens, not thousands), so
 // there's no need for anything fancier.
