@@ -202,17 +202,42 @@ PKGFILE=$(ls -t ./*."$PKGKIND" 2>/dev/null | head -n1)
 log "Built $PKGFILE"
 
 # ---- 8. Install ----
+# The package name is derived from the current branch (contrib/semver/
+# name.sh), same as the build name baked into the binary - so switching
+# which branch this installer runs from (e.g. a feature branch to
+# develop) produces a differently-NAMED package that still owns the same
+# /usr/bin/yggdrasil[ctl] files as whatever was installed before. dpkg
+# refuses to let one package overwrite files another package owns; `dpkg
+# -i ... || apt-get install -y -f` does not fix that (-f resolves missing
+# *dependencies*, not file-ownership conflicts) - left unhandled, that
+# failure was silently swallowed here and the script went on to restart
+# the untouched old binary while reporting success. Remove any
+# differently-named yggdrasil package first, and verify the new one
+# actually reports installed afterward rather than assuming it did.
+PKGNAME=$(sh contrib/semver/name.sh)
 log "Installing $PKGFILE"
 case "$PKGKIND" in
   deb)
-    dpkg -i "$PKGFILE" || apt-get install -y -f
+    OLDPKGS=$(dpkg-query -W -f='${Package}\n' 'yggdrasil*' 2>/dev/null | grep -v "^${PKGNAME}\$" || true)
+    if [ -n "$OLDPKGS" ]; then
+      log "Removing previously-installed package(s) under a different name: $OLDPKGS"
+      dpkg --purge $OLDPKGS || die "failed to remove old package(s): $OLDPKGS"
+    fi
+    dpkg -i "$PKGFILE" || apt-get install -y -f || die "dpkg/apt-get failed to install $PKGFILE"
+    dpkg -s "$PKGNAME" >/dev/null 2>&1 || die "package $PKGNAME does not report as installed after the install step"
     ;;
   rpm)
-    if command -v dnf >/dev/null 2>&1; then
-      dnf install -y "./$PKGFILE"
-    else
-      rpm -Uvh "$PKGFILE"
+    OLDPKGS=$(rpm -qa --qf '%{NAME}\n' 'yggdrasil*' 2>/dev/null | grep -v "^${PKGNAME}\$" || true)
+    if [ -n "$OLDPKGS" ]; then
+      log "Removing previously-installed package(s) under a different name: $OLDPKGS"
+      rpm -e $OLDPKGS || die "failed to remove old package(s): $OLDPKGS"
     fi
+    if command -v dnf >/dev/null 2>&1; then
+      dnf install -y "./$PKGFILE" || die "dnf failed to install $PKGFILE"
+    else
+      rpm -Uvh "$PKGFILE" || die "rpm failed to install $PKGFILE"
+    fi
+    rpm -q "$PKGNAME" >/dev/null 2>&1 || die "package $PKGNAME does not report as installed after the install step"
     ;;
 esac
 
