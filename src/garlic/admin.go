@@ -48,6 +48,29 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}, nil
 		})
 
+	_ = a.AddHandler("garlicPingCapability", "Like garlicQueryCapability, but always sends a fresh request and ignores any cached answer - use this to check whether a peer's advertised versions changed (e.g. after an upgrade) without waiting for this node's own capability cache to expire, which it never does on its own", []string{"key"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			key, err := hex.DecodeString(req.Key)
+			if err != nil {
+				return nil, fmt.Errorf("invalid key: %w", err)
+			}
+			msg, rtt, err := g.PingCapability(key)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{
+				"versions":  msg.Versions,
+				"publicKey": hex.EncodeToString(msg.PublicKey),
+				"rttMillis": rtt.Milliseconds(),
+			}, nil
+		})
+
 	_ = a.AddHandler("createGarlicCircuit", "Build a circuit through the given comma-separated, ordered list of hex node keys", []string{"hops"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {

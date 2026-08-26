@@ -436,3 +436,54 @@ func TestGarlicGossipPullHandlerTriggersRequestGossip(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestGarlicPingCapabilityHandlerResponseShape is the wire-level test for
+// garlicPingCapability (see garlicQueryCapability's own tests elsewhere
+// in this file for the sibling handler's shape) - added alongside the
+// admin RPC itself, which exists so an operator can check whether a
+// peer's advertised versions changed (e.g. after an upgrade) without
+// waiting on this node's own capability cache, which QueryCapability
+// consults and which never expires on its own. PingCapability's actual
+// cache-bypass behavior is a pre-existing, already-unconditional code
+// path (manager.go's PingCapability calls requestCapability directly,
+// never consulting capabilityCache) - this test is scoped to what's new
+// here: the admin wiring and its JSON response shape.
+func TestGarlicPingCapabilityHandlerResponseShape(t *testing.T) {
+	cA := newLinkedTestNode(t)
+	defer cA.Stop()
+	cB := newLinkedTestNode(t)
+	defer cB.Stop()
+	connectChain(t, []*core.Core{cA, cB})
+	pumpAll([]*core.Core{cA, cB})
+
+	idA, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (A) returned error: %v", err)
+	}
+	idB, err := garlic.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (B) returned error: %v", err)
+	}
+	cfg := garlic.DefaultConfig()
+	cfg.CapabilityTimeout = 2 * time.Second
+	gB := garlic.New(cB, idB, cfg, garlic.NewStaticRendezvous())
+	defer gB.Close()
+	gA := garlic.New(cA, idA, cfg, garlic.NewStaticRendezvous())
+	defer gA.Close()
+
+	waitForCapability(t, gA, cB.PublicKey(), 60*time.Second)
+
+	sockPath := newTestAdminSocket(t, cA, gA)
+	resp := callAdminWithArgs(t, sockPath, "garlicPingCapability", map[string]interface{}{"key": hex.EncodeToString(cB.PublicKey())})
+
+	versions, ok := resp["versions"].([]interface{})
+	if !ok || len(versions) == 0 {
+		t.Fatalf("garlicPingCapability response versions = %+v, want a non-empty list", resp["versions"])
+	}
+	if pk, ok := resp["publicKey"].(string); !ok || pk != hex.EncodeToString(idB.PublicKey) {
+		t.Fatalf("garlicPingCapability response publicKey = %v, want %q", resp["publicKey"], hex.EncodeToString(idB.PublicKey))
+	}
+	if _, ok := resp["rttMillis"].(float64); !ok {
+		t.Fatalf("garlicPingCapability response rttMillis = %v (%T), want a number", resp["rttMillis"], resp["rttMillis"])
+	}
+}
